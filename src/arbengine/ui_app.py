@@ -44,7 +44,7 @@ with st.sidebar:
 
 if not db_path.exists():
     st.info("No history database yet. Start shadow mode, then refresh this page.")
-    st.code("sportage shadow --provider theoddsapi --min-net-roi 0.015")
+    st.code("sportage shadow --provider oddsapiio --min-net-roi 0.015")
     st.stop()
 
 cost_book = load_cost_config(cost_path)
@@ -97,12 +97,13 @@ with tab_live:
 
 with tab_backtest:
     st.subheader("Historical shadow backtest")
-    st.caption("Replays stored quote snapshots with the selected threshold and cost assumptions; the same event/market is not reused.")
-    c1, c2, c3, c4 = st.columns(4)
+    st.caption("Replays stored quote snapshots with the selected threshold/cost assumptions; a configurable persistence filter rejects one-snapshot arbs.")
+    c1, c2, c3, c4, c5 = st.columns(5)
     lookback = c1.number_input("Lookback days", min_value=1, value=30, step=1)
     initial = c2.number_input("Initial bankroll (€)", min_value=1.0, value=5000.0, step=500.0)
     bt_stake = c3.number_input("Max capital / arb (€)", min_value=1.0, value=float(allocation), step=50.0)
     settlement = c4.number_input("Settlement delay (h)", min_value=0.0, value=3.0, step=0.5)
+    persistence = c5.number_input("Min signal persistence (s)", min_value=0.0, value=30.0, step=5.0)
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=int(lookback))
     result = run_backtest(store, BacktestConfig(
@@ -111,21 +112,25 @@ with tab_backtest:
         min_net_roi=Decimal(str(min_net_roi)),
         max_quote_age_seconds=max_age,
         settlement_hours=float(settlement),
+        min_signal_persistence_seconds=float(persistence),
         start=start,
         end=end,
     ), cost_book=cost_book)
 
-    b1, b2, b3, b4, b5 = st.columns(5)
+    b1, b2, b3, b4, b5, b6 = st.columns(6)
     b1.metric("Projected NET", money(result.projected_profit), pct(result.projected_return_pct))
     b2.metric("Executed arbs", len(result.trades))
     b3.metric("Signals seen", result.signals_seen)
     b4.metric("Ending cash", money(result.ending_cash))
     b5.metric("Capital locked", money(result.locked_capital))
+    b6.metric("Rejected: too brief", result.signals_rejected_for_persistence)
     if result.trades:
         st.dataframe([{
-            "Detected": t.detected_at.isoformat(),
+            "First seen": t.first_seen_at.isoformat(),
+            "Executed": t.detected_at.isoformat(),
             "Event": t.event,
             "Market": t.market,
+            "Persistence s": round(t.persistence_seconds, 1),
             "NET ROI": float(t.net_roi),
             "Capital €": float(t.capital_used),
             "Guaranteed net €": float(t.guaranteed_profit),

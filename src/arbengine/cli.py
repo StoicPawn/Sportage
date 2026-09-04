@@ -15,6 +15,7 @@ from .backtest import BacktestConfig, run_backtest
 from .costs import load_cost_config
 from .engine import find_arbitrage
 from .providers.mock import MockProvider
+from .providers.odds_api_io import OddsApiIoProvider
 from .providers.the_odds_api import TheOddsAPIProvider
 from .shadow import run_shadow_loop
 from .storage import SQLiteStore
@@ -28,7 +29,9 @@ def _provider(name: str, markets: str = "h2h,spreads,totals"):
         return MockProvider()
     if name == "theoddsapi":
         return TheOddsAPIProvider(markets=markets)
-    raise typer.BadParameter("provider must be 'mock' or 'theoddsapi'")
+    if name == "oddsapiio":
+        return OddsApiIoProvider()
+    raise typer.BadParameter("provider must be 'mock', 'theoddsapi' or 'oddsapiio'")
 
 
 @app.command()
@@ -59,8 +62,13 @@ def scan(
         table = Table("Outcome", "Bookmaker", "Odds", "Effective", "Stake", "Outlay", "Net return")
         for leg in opp.legs:
             table.add_row(
-                leg.outcome, leg.bookmaker, str(leg.odds), f"{leg.effective_odds:.4f}",
-                str(leg.stake), str(leg.cash_outlay), str(leg.net_return_if_win)
+                leg.outcome,
+                leg.bookmaker,
+                str(leg.odds),
+                f"{leg.effective_odds:.4f}",
+                str(leg.stake),
+                str(leg.cash_outlay),
+                str(leg.net_return_if_win),
             )
         console.print(table)
 
@@ -96,6 +104,7 @@ def backtest_command(
     min_net_roi: float = typer.Option(0.015, min=0.0),
     costs: Path | None = typer.Option(None, exists=True),
     settlement_hours: float = typer.Option(3.0, min=0.0),
+    min_persistence_seconds: float = typer.Option(0.0, min=0.0),
 ) -> None:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
@@ -108,6 +117,7 @@ def backtest_command(
                 stake_per_opportunity=Decimal(str(stake_per_arb)),
                 min_net_roi=Decimal(str(min_net_roi)),
                 settlement_hours=settlement_hours,
+                min_signal_persistence_seconds=min_persistence_seconds,
                 start=start,
                 end=end,
             ),
@@ -119,12 +129,15 @@ def backtest_command(
     console.print(
         f"Scans={result.scans} Trades={len(result.trades)} Signals={result.signals_seen} | "
         f"Projected net={result.projected_profit:.2f} ({result.projected_return_pct:.2%}) | "
-        f"Realized={result.realized_profit:.2f}"
+        f"Realized={result.realized_profit:.2f} | "
+        f"Persistence rejects={result.signals_rejected_for_persistence}"
     )
 
 
 @app.command()
-def ui(db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3")))) -> None:
+def ui(
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
+) -> None:
     env = os.environ.copy()
     env["ARB_DB_PATH"] = str(db)
     app_path = Path(__file__).resolve().parent / "ui_app.py"
