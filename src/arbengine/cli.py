@@ -14,6 +14,7 @@ from rich.table import Table
 from .backtest import BacktestConfig, run_backtest
 from .costs import load_cost_config
 from .engine import find_arbitrage
+from .liquidity import load_liquidity_config
 from .providers.mock import MockProvider
 from .providers.odds_api_io import OddsApiIoProvider
 from .providers.the_odds_api import TheOddsAPIProvider
@@ -40,6 +41,7 @@ def scan(
     bankroll: float = typer.Option(1000.0, min=0.01),
     min_net_roi: float = typer.Option(0.0, min=0.0),
     costs: Path | None = typer.Option(None, exists=True),
+    liquidity: Path | None = typer.Option(None, exists=True),
     markets: str = typer.Option("h2h,spreads,totals"),
 ) -> None:
     quotes = _provider(provider, markets=markets).fetch_quotes()
@@ -48,6 +50,7 @@ def scan(
         bankroll=Decimal(str(bankroll)),
         min_net_roi=Decimal(str(min_net_roi)),
         cost_book=load_cost_config(costs),
+        liquidity_book=load_liquidity_config(liquidity),
     )
     if not opportunities:
         console.print("No net arbitrage found.")
@@ -80,6 +83,7 @@ def shadow(
     min_net_roi: float = typer.Option(float(os.getenv("ARB_MIN_NET_ROI", "0.015")), min=0.0),
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
     costs: Path | None = typer.Option(None, exists=True),
+    liquidity: Path | None = typer.Option(None, exists=True),
     markets: str = typer.Option("h2h,spreads,totals"),
     interval: float = typer.Option(30.0, min=1.0),
     iterations: int | None = typer.Option(None, min=1),
@@ -90,6 +94,7 @@ def shadow(
         bankroll=Decimal(str(bankroll)),
         min_net_roi=Decimal(str(min_net_roi)),
         cost_book=load_cost_config(costs),
+        liquidity_book=load_liquidity_config(liquidity),
         interval_seconds=interval,
         iterations=iterations,
     )
@@ -103,6 +108,7 @@ def backtest_command(
     stake_per_arb: float = typer.Option(500.0, min=0.01),
     min_net_roi: float = typer.Option(0.015, min=0.0),
     costs: Path | None = typer.Option(None, exists=True),
+    liquidity: Path | None = typer.Option(None, exists=True),
     settlement_hours: float = typer.Option(3.0, min=0.0),
     min_persistence_seconds: float = typer.Option(0.0, min=0.0),
 ) -> None:
@@ -118,10 +124,12 @@ def backtest_command(
                 min_net_roi=Decimal(str(min_net_roi)),
                 settlement_hours=settlement_hours,
                 min_signal_persistence_seconds=min_persistence_seconds,
+                enforce_bookmaker_liquidity=liquidity is not None,
                 start=start,
                 end=end,
             ),
             cost_book=load_cost_config(costs),
+            liquidity_book=load_liquidity_config(liquidity),
         )
     finally:
         store.close()
@@ -130,7 +138,8 @@ def backtest_command(
         f"Scans={result.scans} Trades={len(result.trades)} Signals={result.signals_seen} | "
         f"Projected net={result.projected_profit:.2f} ({result.projected_return_pct:.2%}) | "
         f"Realized={result.realized_profit:.2f} | "
-        f"Persistence rejects={result.signals_rejected_for_persistence}"
+        f"Persistence rejects={result.signals_rejected_for_persistence} | "
+        f"Liquidity rejects={result.signals_rejected_for_liquidity}"
     )
 
 
