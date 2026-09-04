@@ -51,7 +51,13 @@ class Quote(BaseModel):
 
 
 class CostProfile(BaseModel):
-    """Conservative execution-cost assumptions for one bookmaker/exchange."""
+    """Conservative execution-cost assumptions for one bookmaker/exchange.
+
+    Percentages are decimal fractions: 0.02 means 2%.
+    `commission_on_winnings_pct` is applied only to positive winnings, while
+    `stake_fee_pct` and `fixed_cost_per_bet` are paid whenever the leg is placed.
+    `slippage_bps` conservatively reduces the quoted decimal price.
+    """
 
     bookmaker: str = "*"
     commission_on_winnings_pct: Decimal = Field(default=Decimal("0"), ge=0, lt=1)
@@ -94,11 +100,14 @@ class ArbitrageOpportunity(BaseModel):
     gross_guaranteed_profit: Decimal
     guaranteed_profit: Decimal
     estimated_costs: Decimal
+    liquidity_limited: bool = False
+    limiting_bookmakers: list[str] = Field(default_factory=list)
     legs: list[Leg]
     detected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def roi(self) -> Decimal:
+        """Backward-compatible alias: all thresholds now use net ROI."""
         return self.net_roi
 
     @property

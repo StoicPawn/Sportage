@@ -28,10 +28,11 @@ or a different frontend without rewriting the arbitrage math.
   - conservative quote slippage in basis points;
   - min/max stake limits.
 - Cost-aware optimiser enumerates bookmaker combinations instead of blindly choosing highest raw odds.
+- Optional per-bookmaker liquidity caps resize opportunities to the cash actually available on each account.
 - Markets: H2H, 1X2, totals, spreads.
 - Scan-run IDs and quote history in SQLite.
 - Bankroll-aware historical backtest with capital locking until settlement, one trade per event/market and configurable minimum signal persistence.
-- Streamlit dashboard with latest scanner, backtest and cost-model tabs.
+- Streamlit dashboard with latest scanner, backtest, cost-model and liquidity tabs.
 - CLI and CI tests.
 
 No automatic bet placement is implemented. The current objective is to prove that opportunities remain
@@ -67,7 +68,8 @@ pytest -q
 
 ```bash
 sportage scan --provider mock --bankroll 1000 --min-net-roi 0.015 \
-  --costs config/costs.example.json
+  --costs config/costs.example.json \
+  --liquidity config/liquidity.example.json
 ```
 
 ## Shadow collection
@@ -80,6 +82,7 @@ sportage shadow \
   --provider oddsapiio \
   --db data/arbitrage.sqlite3 \
   --costs config/costs.example.json \
+  --liquidity config/liquidity.example.json \
   --min-net-roi 0.015 \
   --interval 120
 ```
@@ -105,7 +108,8 @@ sportage backtest \
   --stake-per-arb 500 \
   --min-net-roi 0.015 \
   --min-persistence-seconds 30 \
-  --costs config/costs.example.json
+  --costs config/costs.example.json \
+  --liquidity config/liquidity.example.json
 ```
 
 Backtest rules in V0.2:
@@ -116,7 +120,10 @@ Backtest rules in V0.2:
 - optionally require a signal to remain above the NET threshold across successive scans for a minimum number of seconds; a disappearance resets the clock;
 - lock actual capital used until event time + settlement delay;
 - compound guaranteed returns as capital becomes available;
-- report realized cash, still-locked capital and projected guaranteed net.
+- report realized cash, still-locked capital and projected guaranteed net;
+- when a liquidity file is supplied, enforce bookmaker-specific concurrent cash caps and report turnover plus peak locked outlay per bookmaker.
+
+The current per-bookmaker backtest is a **working-capital model**: cash committed to an active position reduces the liquidity available on that bookmaker and is released at settlement. It assumes balances can be rebalanced after settlement. Exact outcome-dependent account paths will require a results/settlement feed.
 
 ## UI
 
@@ -144,6 +151,23 @@ execution and the fee schedule of each operator. Example:
 }
 ```
 
+## Liquidity configuration
+
+`config/liquidity.example.json` models where the bankroll actually sits. This is separate from fees because balances change much more frequently than bookmaker cost rules.
+
+```json
+{
+  "default_balance": 0,
+  "bookmakers": {
+    "Book A": 300,
+    "Book B": 300,
+    "Betfair Exchange": 300
+  }
+}
+```
+
+`default_balance: 0` means only listed/funded accounts may be used. `null` leaves unlisted bookmakers unconstrained. The optimiser aggregates multiple legs placed at the same bookmaker before applying its cash cap.
+
 ## Architecture
 
 ```text
@@ -155,10 +179,10 @@ Normalized Quote + complete-market signature
         +------> SQLite shadow history ------> Backtest
         |
         v
-Cost-aware arbitrage optimiser
+Cost + liquidity aware arbitrage optimiser
         |
         v
-NET threshold / risk filters
+NET threshold / execution filters
         |
         +------> CLI
         +------> Streamlit UI
