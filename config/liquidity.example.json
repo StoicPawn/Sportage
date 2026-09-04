@@ -1,0 +1,9 @@
+{
+  "default_balance": 0,
+  "bookmakers": {
+    "Book A": 300,
+    "Book B": 300,
+    "Book C": 300,
+    "Betfair Exchange": 300
+  }
+}
