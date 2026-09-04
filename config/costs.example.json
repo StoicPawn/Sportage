@@ -1,0 +1,22 @@
+{
+  "default": {
+    "bookmaker": "*",
+    "commission_on_winnings_pct": 0,
+    "stake_fee_pct": 0,
+    "fixed_cost_per_bet": 0,
+    "slippage_bps": 10,
+    "min_stake": 1,
+    "max_stake": null
+  },
+  "bookmakers": [
+    {
+      "bookmaker": "Betfair Exchange",
+      "commission_on_winnings_pct": 0.05,
+      "stake_fee_pct": 0,
+      "fixed_cost_per_bet": 0,
+      "slippage_bps": 15,
+      "min_stake": 1,
+      "max_stake": null
+    }
+  ]
+}
