@@ -104,6 +104,7 @@ def backtest_command(
     min_net_roi: float = typer.Option(0.015, min=0.0),
     costs: Path | None = typer.Option(None, exists=True),
     settlement_hours: float = typer.Option(3.0, min=0.0),
+    min_persistence_seconds: float = typer.Option(0.0, min=0.0),
 ) -> None:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
@@ -116,6 +117,7 @@ def backtest_command(
                 stake_per_opportunity=Decimal(str(stake_per_arb)),
                 min_net_roi=Decimal(str(min_net_roi)),
                 settlement_hours=settlement_hours,
+                min_signal_persistence_seconds=min_persistence_seconds,
                 start=start,
                 end=end,
             ),
@@ -127,7 +129,8 @@ def backtest_command(
     console.print(
         f"Scans={result.scans} Trades={len(result.trades)} Signals={result.signals_seen} | "
         f"Projected net={result.projected_profit:.2f} ({result.projected_return_pct:.2%}) | "
-        f"Realized={result.realized_profit:.2f}"
+        f"Realized={result.realized_profit:.2f} | "
+        f"Persistence rejects={result.signals_rejected_for_persistence}"
     )
 
 
