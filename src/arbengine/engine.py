@@ -35,8 +35,6 @@ def _evaluate_combination(
     if fixed_total >= bankroll:
         return None
 
-    # Equalise net return across every outcome. Placement costs are part of the
-    # cash budget, so the denominator includes per-stake fees.
     denom = sum(
         (
             (Decimal("1") + profiles[outcome].stake_fee_pct) / factors[outcome]
@@ -46,8 +44,6 @@ def _evaluate_combination(
     )
     target_return = (bankroll - fixed_total) / denom
 
-    # Respect bookmaker max stakes by scaling the whole surebet down, keeping
-    # outcome returns equal. Unused cash remains unexposed.
     max_return = target_return
     limiting_bookmakers: set[str] = set()
     for outcome, profile in profiles.items():
@@ -56,10 +52,6 @@ def _evaluate_combination(
             if stake_cap_return < max_return:
                 max_return = stake_cap_return
 
-    # A global bankroll is not enough in practice: cash must already sit at the
-    # bookmaker used by each leg. Because every stake is proportional to the
-    # common guaranteed return R, aggregate bookmaker cash outlay is linear in R.
-    # This lets us resize the whole surebet exactly while preserving equal returns.
     outcomes_by_bookmaker: dict[str, list[str]] = defaultdict(list)
     display_name_by_key: dict[str, str] = {}
     for outcome, quote in selected.items():
@@ -119,6 +111,7 @@ def _evaluate_combination(
             Leg(
                 outcome=outcome,
                 bookmaker=quote.bookmaker,
+                operator_id=quote.operator_id,
                 odds=quote.odds,
                 effective_odds=adjusted_odds,
                 stake=stake,
@@ -134,8 +127,6 @@ def _evaluate_combination(
     if cash_used <= 0 or cash_used > bankroll:
         return None
 
-    # Rounding should only reduce outlay, nevertheless enforce the aggregate
-    # per-book constraint explicitly as a final safety check.
     outlay_by_bookmaker: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for leg in legs:
         outlay_by_bookmaker[canonical_name(leg.bookmaker)] += leg.cash_outlay
@@ -222,8 +213,6 @@ def find_arbitrage(
             continue
 
         best_net: ArbitrageOpportunity | None = None
-        # Enumerating combinations gives the correct choice when commission,
-        # fixed fees or stake limits make the highest raw odd suboptimal.
         for combo in product(*(candidates[outcome] for outcome in outcomes)):
             selected = dict(zip(outcomes, combo, strict=True))
             opportunity = _evaluate_combination(selected, bankroll, cost_book, now, liquidity_book)

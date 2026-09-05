@@ -22,6 +22,8 @@ class MarketType(str, Enum):
 
 class Quote(BaseModel):
     event_id: str
+    source_event_id: str | None = None
+    operator_id: str | None = None
     sport: str
     commence_time: datetime
     home: str
@@ -99,6 +101,7 @@ class CostProfile(BaseModel):
 class Leg(BaseModel):
     outcome: str
     bookmaker: str
+    operator_id: str | None = None
     odds: Odds
     effective_odds: Decimal
     stake: Decimal

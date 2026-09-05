@@ -12,13 +12,17 @@ from rich.console import Console
 from rich.table import Table
 
 from .backtest import BacktestConfig, run_backtest
+from .connectors.execution import build_execution_connector
+from .connectors.base import BetOrder
 from .costs import load_cost_config
 from .engine import find_arbitrage
 from .liquidity import load_liquidity_config
 from .models import SettlementResult
+from .operators import operators_by_tier
 from .providers.mock import MockProvider
 from .providers.odds_api_io import OddsApiIoProvider
 from .providers.the_odds_api import TheOddsAPIProvider
+from .providers.unified import build_unified_provider
 from .shadow import run_shadow_loop
 from .storage import SQLiteStore
 
@@ -33,7 +37,9 @@ def _provider(name: str, markets: str = "h2h,spreads,totals"):
         return TheOddsAPIProvider(markets=markets)
     if name == "oddsapiio":
         return OddsApiIoProvider()
-    raise typer.BadParameter("provider must be 'mock', 'theoddsapi' or 'oddsapiio'")
+    if name == "unified":
+        return build_unified_provider()
+    raise typer.BadParameter("provider must be 'mock', 'theoddsapi', 'oddsapiio' or 'unified'")
 
 
 def _parse_datetime(value: str | None) -> datetime:
@@ -43,6 +49,41 @@ def _parse_datetime(value: str | None) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+@app.command("operators")
+def operators_command() -> None:
+    table = Table("Tier", "Operator", "ADM", "Market data", "Execution", "Domains")
+    for spec in operators_by_tier(1, 2):
+        table.add_row(
+            str(spec.tier),
+            f"{spec.display_name} ({spec.operator_id})",
+            spec.adm_concession,
+            spec.market_data_access.value,
+            spec.execution_access.value,
+            ", ".join(spec.domains),
+        )
+    console.print(table)
+
+
+@app.command("execution-preflight")
+def execution_preflight(
+    operator: str = typer.Option(...),
+    market_id: str = typer.Option("example-market"),
+    selection_id: str = typer.Option("1"),
+    stake: float = typer.Option(10.0, min=0.01),
+    odds: float = typer.Option(2.0, min=1.01),
+) -> None:
+    connector = build_execution_connector(operator)
+    order = BetOrder(
+        operator_id=connector.operator_id,
+        market_id=market_id,
+        selection_id=selection_id,
+        stake=Decimal(str(stake)),
+        limit_odds=Decimal(str(odds)),
+    )
+    result = connector.place_order(order, live=False)
+    console.print(f"{connector.operator_id}: {result.status.value} - {result.message}")
 
 
 @app.command()
@@ -88,7 +129,7 @@ def scan(
 
 @app.command()
 def shadow(
-    provider: str = typer.Option("mock"),
+    provider: str = typer.Option("unified"),
     bankroll: float = typer.Option(float(os.getenv("ARB_BANKROLL", "1000")), min=0.01),
     min_net_roi: float = typer.Option(float(os.getenv("ARB_MIN_NET_ROI", "0.015")), min=0.0),
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
@@ -112,9 +153,9 @@ def shadow(
 
 @app.command("result-set")
 def result_set(
-    event_id: str = typer.Option(..., help="Provider event id"),
+    event_id: str = typer.Option(..., help="Canonical Sportage event id"),
     market_signature: str = typer.Option(..., help="Exact signature, e.g. h2h:full_time:"),
-    winning_outcome: str = typer.Option(..., help="Exact winning outcome label"),
+    winning_outcome: str = typer.Option(..., help="Exact normalized winning outcome label"),
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
     settled_at: str | None = typer.Option(None, help="ISO-8601 settlement time; defaults to now"),
     source: str = typer.Option("manual"),
