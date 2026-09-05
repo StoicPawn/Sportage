@@ -99,17 +99,17 @@ def run_backtest(
 ) -> BacktestResult:
     """Replay stored quote snapshots under conservative execution assumptions.
 
-    `guaranteed` mode preserves the original working-capital model: every settled
-    surebet credits its minimum guaranteed return and bookmaker exposure is released.
+    `guaranteed` mode preserves the working-capital model: every settled surebet
+    credits its minimum guaranteed return.
 
     `results` mode requires an exact stored settlement for each event+market. Cash
     outlays are removed from the corresponding bookmaker wallets and only the winning
-    leg's net return is credited back to the winning bookmaker. This makes future
-    opportunities depend on the actual post-settlement distribution of bankroll.
+    leg's net return is credited back to the winning bookmaker. Future opportunities
+    therefore depend on the actual post-settlement distribution of bankroll.
 
     Execution latency is modeled by requiring the signal to remain qualifying until
-    a scan at or after first_seen + persistence + latency; the opportunity is then
-    recomputed from that later scan rather than from the original quote snapshot.
+    a scan at or after first_seen + persistence + latency. The opportunity is then
+    recomputed from that later scan instead of using the original quote snapshot.
     """
     cost_book = cost_book or CostBook()
     liquidity_book = liquidity_book or LiquidityBook()
@@ -181,17 +181,15 @@ def run_backtest(
         while active and active[0].settle_at <= scan_time:
             position = heapq.heappop(active)
             cash += position.settlement_return
-            if config.settlement_mode == "results":
-                if position.payout_bookmaker is not None:
-                    wallets[position.payout_bookmaker] = (
-                        wallets.get(position.payout_bookmaker, Decimal("0"))
-                        + position.settlement_return
-                    )
-            else:
-                for book_key, outlay in position.outlay_by_bookmaker.items():
-                    current_exposure[book_key] = max(
-                        Decimal("0"), current_exposure[book_key] - outlay
-                    )
+            for book_key, outlay in position.outlay_by_bookmaker.items():
+                current_exposure[book_key] = max(
+                    Decimal("0"), current_exposure[book_key] - outlay
+                )
+            if config.settlement_mode == "results" and position.payout_bookmaker is not None:
+                wallets[position.payout_bookmaker] = (
+                    wallets.get(position.payout_bookmaker, Decimal("0"))
+                    + position.settlement_return
+                )
 
         quotes = store.load_quotes_for_scan(int(scan["id"]))
         if not quotes:
@@ -220,9 +218,7 @@ def run_backtest(
             if persistence_seconds < config.min_signal_persistence_seconds:
                 persistence_rejections += 1
                 continue
-            ready_after = (
-                config.min_signal_persistence_seconds + config.execution_latency_seconds
-            )
+            ready_after = config.min_signal_persistence_seconds + config.execution_latency_seconds
             if persistence_seconds < ready_after:
                 latency_rejections += 1
                 continue
@@ -288,12 +284,10 @@ def run_backtest(
                 trade_display_outlays[leg.bookmaker] += leg.cash_outlay
 
             if config.settlement_mode == "results" and config.enforce_bookmaker_liquidity:
-                insufficient = False
-                for book_key, outlay in leg_outlays.items():
-                    if book_key in wallets and wallets[book_key] < outlay:
-                        insufficient = True
-                        break
-                if insufficient:
+                if any(
+                    book_key in wallets and wallets[book_key] < outlay
+                    for book_key, outlay in leg_outlays.items()
+                ):
                     liquidity_rejections += 1
                     continue
 
@@ -325,22 +319,16 @@ def run_backtest(
 
             for book_key, outlay in leg_outlays.items():
                 turnover[book_key] += outlay
-                if config.settlement_mode == "results":
-                    if config.enforce_bookmaker_liquidity and book_key in wallets:
-                        wallets[book_key] -= outlay
-                else:
-                    current_exposure[book_key] += outlay
-                    peak_exposure[book_key] = max(
-                        peak_exposure[book_key], current_exposure[book_key]
-                    )
-
-            if config.settlement_mode == "results":
-                for book_key in leg_outlays:
-                    if book_key in starting_wallets:
-                        locked = starting_wallets[book_key] - wallets.get(book_key, Decimal("0"))
-                        peak_exposure[book_key] = max(
-                            peak_exposure[book_key], max(Decimal("0"), locked)
-                        )
+                current_exposure[book_key] += outlay
+                peak_exposure[book_key] = max(
+                    peak_exposure[book_key], current_exposure[book_key]
+                )
+                if (
+                    config.settlement_mode == "results"
+                    and config.enforce_bookmaker_liquidity
+                    and book_key in wallets
+                ):
+                    wallets[book_key] -= outlay
 
             traded_keys.add(key)
             trades.append(
