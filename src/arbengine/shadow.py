@@ -8,6 +8,7 @@ from .costs import CostBook
 from .engine import find_arbitrage
 from .liquidity import LiquidityBook
 from .providers.base import OddsProvider
+from .scan_history import ScanHistory
 from .storage import SQLiteStore
 
 
@@ -22,14 +23,18 @@ def run_shadow_loop(
     iterations: int | None = None,
 ) -> None:
     store = SQLiteStore(db_path)
+    history = ScanHistory(store)
     completed = 0
     provider_name = provider.__class__.__name__
     try:
         while iterations is None or completed < iterations:
-            scan_id = store.begin_scan(provider_name)
+            session = history.start(provider_name)
+            opportunities = []
             try:
                 quotes = provider.fetch_quotes()
-                store.save_quotes(quotes, scan_id=scan_id)
+                # Persist the normalized snapshot immediately. If later arbitrage
+                # processing fails, the quote history is still retained for replay.
+                session.save_quotes(quotes)
                 opportunities = find_arbitrage(
                     quotes,
                     bankroll=bankroll,
@@ -37,22 +42,35 @@ def run_shadow_loop(
                     cost_book=cost_book,
                     liquidity_book=liquidity_book,
                 )
-                store.save_opportunities(opportunities, scan_id=scan_id)
-                store.finish_scan(scan_id, len(quotes), len(opportunities))
-            except Exception:
-                store.finish_scan(scan_id, 0, 0, status="error")
+                session.save_opportunities(opportunities)
+                receipt = session.complete()
+            except Exception as exc:
+                receipt = session.fail(exc)
+                print(
+                    f"[SCAN ERROR] id={receipt.scan_id} provider={provider_name} "
+                    f"quotes_saved={receipt.quote_count} {receipt.error_type}: "
+                    f"{receipt.error_message}"
+                )
                 raise
 
             if opportunities:
                 best = opportunities[0]
                 print(
-                    f"[ARB] {best.event} | NET ROI {best.net_roi:.4%} | "
+                    f"[ARB] scan={receipt.scan_id} {best.event} | NET ROI {best.net_roi:.4%} | "
                     f"gross {best.gross_roi:.4%} | net profit {best.guaranteed_profit} "
                     f"on {best.capital_used}"
-                    + (f" | liquidity-limited: {', '.join(best.limiting_bookmakers)}" if best.liquidity_limited else "")
+                    + (
+                        f" | liquidity-limited: {', '.join(best.limiting_bookmakers)}"
+                        if best.liquidity_limited
+                        else ""
+                    )
                 )
             else:
-                print(f"[SCAN] {len(quotes)} quotes | no net opportunity >= {min_net_roi:.2%}")
+                print(
+                    f"[SCAN] id={receipt.scan_id} {receipt.quote_count} quotes | "
+                    f"no net opportunity >= {min_net_roi:.2%} | "
+                    f"{receipt.duration_ms:.0f} ms"
+                )
 
             completed += 1
             if iterations is None or completed < iterations:
