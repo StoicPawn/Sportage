@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS quote_snapshots (
     scan_id INTEGER,
     observed_at TEXT NOT NULL,
     event_id TEXT NOT NULL,
+    source_event_id TEXT,
+    operator_id TEXT,
     sport TEXT,
     commence_time TEXT,
     home TEXT,
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS quote_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_quote_event_market ON quote_snapshots(event_id, market);
 CREATE INDEX IF NOT EXISTS idx_quote_scan ON quote_snapshots(scan_id);
+CREATE INDEX IF NOT EXISTS idx_quote_operator_event ON quote_snapshots(operator_id, event_id);
 CREATE TABLE IF NOT EXISTS opportunities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_id INTEGER,
@@ -80,7 +83,6 @@ class SQLiteStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
-        # WAL lets the scanner keep writing while UI/backtest readers inspect history.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
@@ -97,6 +99,8 @@ class SQLiteStore:
     def _migrate_legacy_schema(self) -> None:
         for name, definition in {
             "scan_id": "INTEGER",
+            "source_event_id": "TEXT",
+            "operator_id": "TEXT",
             "sport": "TEXT",
             "commence_time": "TEXT",
             "home": "TEXT",
@@ -197,14 +201,29 @@ class SQLiteStore:
             return
         self.conn.executemany(
             """INSERT INTO quote_snapshots
-            (scan_id, observed_at, event_id, sport, commence_time, home, away, market, period, market_line,
-             expected_outcomes, bookmaker, outcome, odds, source, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (scan_id, observed_at, event_id, source_event_id, operator_id, sport, commence_time,
+             home, away, market, period, market_line, expected_outcomes, bookmaker, outcome,
+             odds, source, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(
-                scan_id, q.observed_at.isoformat(), q.event_id, q.sport, q.commence_time.isoformat(),
-                q.home, q.away, q.market.value, q.period,
-                None if q.market_line is None else str(q.market_line), q.expected_outcomes,
-                q.bookmaker, q.outcome, str(q.odds), q.source, q.model_dump_json()
+                scan_id,
+                q.observed_at.isoformat(),
+                q.event_id,
+                q.source_event_id,
+                q.operator_id,
+                q.sport,
+                q.commence_time.isoformat(),
+                q.home,
+                q.away,
+                q.market.value,
+                q.period,
+                None if q.market_line is None else str(q.market_line),
+                q.expected_outcomes,
+                q.bookmaker,
+                q.outcome,
+                str(q.odds),
+                q.source,
+                q.model_dump_json(),
             ) for q in quotes],
         )
         self.conn.commit()
@@ -261,13 +280,14 @@ class SQLiteStore:
         return [SettlementResult.model_validate_json(row["payload"]) for row in rows]
 
     def list_scans(self, start: datetime | None = None, end: datetime | None = None) -> list[sqlite3.Row]:
-        """Backtest-compatible listing: only successfully completed scans."""
         clauses = ["status='ok'"]
         params: list[str] = []
         if start is not None:
-            clauses.append("started_at >= ?"); params.append(start.isoformat())
+            clauses.append("started_at >= ?")
+            params.append(start.isoformat())
         if end is not None:
-            clauses.append("started_at <= ?"); params.append(end.isoformat())
+            clauses.append("started_at <= ?")
+            params.append(end.isoformat())
         return list(self.conn.execute(
             f"SELECT * FROM scan_runs WHERE {' AND '.join(clauses)} ORDER BY started_at, id", params
         ))
