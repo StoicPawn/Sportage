@@ -15,9 +15,13 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     provider TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'running',
     quote_count INTEGER NOT NULL DEFAULT 0,
-    opportunity_count INTEGER NOT NULL DEFAULT 0
+    opportunity_count INTEGER NOT NULL DEFAULT 0,
+    duration_ms REAL,
+    error_type TEXT,
+    error_message TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_scan_runs_started ON scan_runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_scan_runs_provider_started ON scan_runs(provider, started_at);
 CREATE TABLE IF NOT EXISTS quote_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_id INTEGER,
@@ -76,6 +80,9 @@ class SQLiteStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        # WAL lets the scanner keep writing while UI/backtest readers inspect history.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         self._migrate_legacy_schema()
         self.conn.commit()
@@ -89,15 +96,30 @@ class SQLiteStore:
 
     def _migrate_legacy_schema(self) -> None:
         for name, definition in {
-            "scan_id": "INTEGER", "sport": "TEXT", "commence_time": "TEXT", "home": "TEXT",
-            "away": "TEXT", "period": "TEXT DEFAULT 'full_time'", "market_line": "TEXT",
-            "expected_outcomes": "INTEGER DEFAULT 2", "source": "TEXT"
+            "scan_id": "INTEGER",
+            "sport": "TEXT",
+            "commence_time": "TEXT",
+            "home": "TEXT",
+            "away": "TEXT",
+            "period": "TEXT DEFAULT 'full_time'",
+            "market_line": "TEXT",
+            "expected_outcomes": "INTEGER DEFAULT 2",
+            "source": "TEXT",
         }.items():
             self._ensure_column("quote_snapshots", name, definition)
         for name, definition in {
-            "scan_id": "INTEGER", "net_roi": "TEXT", "gross_roi": "TEXT", "capital_used": "TEXT"
+            "scan_id": "INTEGER",
+            "net_roi": "TEXT",
+            "gross_roi": "TEXT",
+            "capital_used": "TEXT",
         }.items():
             self._ensure_column("opportunities", name, definition)
+        for name, definition in {
+            "duration_ms": "REAL",
+            "error_type": "TEXT",
+            "error_message": "TEXT",
+        }.items():
+            self._ensure_column("scan_runs", name, definition)
         cols = self._columns("opportunities")
         if "roi" in cols and "net_roi" in cols:
             self.conn.execute("UPDATE opportunities SET net_roi = roi WHERE net_roi IS NULL")
@@ -111,14 +133,68 @@ class SQLiteStore:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def finish_scan(self, scan_id: int, quote_count: int, opportunity_count: int, status: str = "ok") -> None:
+    def finish_scan(
+        self,
+        scan_id: int,
+        quote_count: int,
+        opportunity_count: int,
+        status: str = "ok",
+        *,
+        completed_at: datetime | None = None,
+        duration_ms: float | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        completed_at = completed_at or datetime.now(timezone.utc)
         self.conn.execute(
-            "UPDATE scan_runs SET completed_at=?, quote_count=?, opportunity_count=?, status=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), quote_count, opportunity_count, status, scan_id),
+            """UPDATE scan_runs
+            SET completed_at=?, quote_count=?, opportunity_count=?, status=?,
+                duration_ms=?, error_type=?, error_message=?
+            WHERE id=?""",
+            (
+                completed_at.isoformat(),
+                quote_count,
+                opportunity_count,
+                status,
+                duration_ms,
+                error_type,
+                error_message,
+                scan_id,
+            ),
         )
         self.conn.commit()
 
+    def get_scan(self, scan_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
+
+    def list_scan_runs(
+        self,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+    ) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if start is not None:
+            clauses.append("started_at >= ?")
+            params.append(start.isoformat())
+        if end is not None:
+            clauses.append("started_at <= ?")
+            params.append(end.isoformat())
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM scan_runs {where} ORDER BY started_at DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return list(self.conn.execute(sql, params))
+
     def save_quotes(self, quotes: list[Quote], scan_id: int | None = None) -> None:
+        if not quotes:
+            return
         self.conn.executemany(
             """INSERT INTO quote_snapshots
             (scan_id, observed_at, event_id, sport, commence_time, home, away, market, period, market_line,
@@ -134,6 +210,8 @@ class SQLiteStore:
         self.conn.commit()
 
     def save_opportunities(self, opportunities: list[ArbitrageOpportunity], scan_id: int | None = None) -> None:
+        if not opportunities:
+            return
         self.conn.executemany(
             """INSERT INTO opportunities
             (scan_id, detected_at, fingerprint, event_id, market, net_roi, gross_roi, capital_used,
@@ -183,6 +261,7 @@ class SQLiteStore:
         return [SettlementResult.model_validate_json(row["payload"]) for row in rows]
 
     def list_scans(self, start: datetime | None = None, end: datetime | None = None) -> list[sqlite3.Row]:
+        """Backtest-compatible listing: only successfully completed scans."""
         clauses = ["status='ok'"]
         params: list[str] = []
         if start is not None:
@@ -206,6 +285,7 @@ class SQLiteStore:
 
     def summary(self) -> dict[str, int | float]:
         scans = self.conn.execute("SELECT COUNT(*) c FROM scan_runs WHERE status='ok'").fetchone()["c"]
+        failed_scans = self.conn.execute("SELECT COUNT(*) c FROM scan_runs WHERE status='error'").fetchone()["c"]
         quotes = self.conn.execute("SELECT COUNT(*) c FROM quote_snapshots").fetchone()["c"]
         opportunities = self.conn.execute("SELECT COUNT(*) c FROM opportunities").fetchone()["c"]
         settlements = self.conn.execute("SELECT COUNT(*) c FROM settlement_results").fetchone()["c"]
@@ -214,6 +294,7 @@ class SQLiteStore:
         ).fetchone()["v"]
         return {
             "scans": scans,
+            "failed_scans": failed_scans,
             "quotes": quotes,
             "opportunities": opportunities,
             "settlements": settlements,
