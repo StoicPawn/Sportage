@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import ArbitrageOpportunity, Quote
+from .models import ArbitrageOpportunity, Quote, SettlementResult
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scan_runs (
@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS opportunities (
 );
 CREATE INDEX IF NOT EXISTS idx_opportunity_fingerprint ON opportunities(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_opportunity_scan ON opportunities(scan_id);
+CREATE TABLE IF NOT EXISTS settlement_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    market_signature TEXT NOT NULL,
+    winning_outcome TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE(event_id, market_signature)
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_event_market
+ON settlement_results(event_id, market_signature);
 """
 
 
@@ -133,6 +146,42 @@ class SQLiteStore:
         )
         self.conn.commit()
 
+    def save_settlement_result(self, result: SettlementResult) -> None:
+        self.conn.execute(
+            """INSERT INTO settlement_results
+            (event_id, market_signature, winning_outcome, settled_at, source, observed_at, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id, market_signature) DO UPDATE SET
+                winning_outcome=excluded.winning_outcome,
+                settled_at=excluded.settled_at,
+                source=excluded.source,
+                observed_at=excluded.observed_at,
+                payload=excluded.payload""",
+            (
+                result.event_id,
+                result.market_signature,
+                result.winning_outcome,
+                result.settled_at.isoformat(),
+                result.source,
+                result.observed_at.isoformat(),
+                result.model_dump_json(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_settlement_result(self, event_id: str, market_signature: str) -> SettlementResult | None:
+        row = self.conn.execute(
+            "SELECT payload FROM settlement_results WHERE event_id=? AND market_signature=?",
+            (event_id, market_signature),
+        ).fetchone()
+        return None if row is None else SettlementResult.model_validate_json(row["payload"])
+
+    def list_settlement_results(self) -> list[SettlementResult]:
+        rows = self.conn.execute(
+            "SELECT payload FROM settlement_results ORDER BY settled_at, id"
+        ).fetchall()
+        return [SettlementResult.model_validate_json(row["payload"]) for row in rows]
+
     def list_scans(self, start: datetime | None = None, end: datetime | None = None) -> list[sqlite3.Row]:
         clauses = ["status='ok'"]
         params: list[str] = []
@@ -159,10 +208,17 @@ class SQLiteStore:
         scans = self.conn.execute("SELECT COUNT(*) c FROM scan_runs WHERE status='ok'").fetchone()["c"]
         quotes = self.conn.execute("SELECT COUNT(*) c FROM quote_snapshots").fetchone()["c"]
         opportunities = self.conn.execute("SELECT COUNT(*) c FROM opportunities").fetchone()["c"]
+        settlements = self.conn.execute("SELECT COUNT(*) c FROM settlement_results").fetchone()["c"]
         best = self.conn.execute(
             "SELECT MAX(CAST(net_roi AS REAL)) v FROM opportunities WHERE net_roi IS NOT NULL"
         ).fetchone()["v"]
-        return {"scans": scans, "quotes": quotes, "opportunities": opportunities, "best_net_roi": best or 0.0}
+        return {
+            "scans": scans,
+            "quotes": quotes,
+            "opportunities": opportunities,
+            "settlements": settlements,
+            "best_net_roi": best or 0.0,
+        }
 
     def close(self) -> None:
         self.conn.close()

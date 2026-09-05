@@ -1,42 +1,48 @@
 # Sportage
 
-Sportage is a **net sports-arbitrage** research and scanning engine. It collects sportsbook/exchange
-quotes, normalizes markets, identifies surebets only when every mutually-exclusive outcome is covered,
-subtracts configurable execution costs, stores quote history, and replays that history in a bankroll-aware
-backtest.
+Sportage is a **net sports-arbitrage** scanner and backtesting engine. It collects sportsbook/exchange
+quotes, normalizes markets, requires complete outcome coverage, subtracts configurable execution costs,
+respects bookmaker-specific liquidity, stores quote history and replays that history with conservative
+execution assumptions.
 
-The MVP is deliberately cheap: Python + SQLite + a provider adapter + Streamlit. The core domain is kept
-independent of the UI and data provider so the system can later move to Postgres, Redis/queues, paid feeds,
-or a different frontend without rewriting the arbitrage math.
+The MVP is deliberately cheap: Python + SQLite + provider adapters + Streamlit. The domain core is isolated
+from the UI and data providers so it can later move to Postgres/Timescale, queues, paid feeds or a dedicated
+frontend without rewriting the arbitrage math.
 
 ## Product goals
 
-1. **Good interface** — dashboard for latest qualifying opportunities, cost assumptions and backtest.
-2. **Net backtest** — “what would this have made?” using stored shadow snapshots, configurable costs,
-   thresholds, bankroll, stake size and settlement delay.
-3. **Multi-event / multi-market scanner** — H2H/1X2 plus totals and spreads from the first real-data adapter.
-   A signal is shown only when its **NET ROI** clears the configured threshold.
-4. **Free-first, scalable later** — local SQLite/Streamlit for MVP; adapters isolate future data upgrades.
+1. **Usable interface** — live opportunities, exact stakes, costs, bankroll requirements and backtest controls.
+2. **Net backtest** — answer “what would this actually have made?” after costs, latency, liquidity and settlement.
+3. **Multi-event / multi-market scanner** — H2H/1X2, totals and spreads, filtered on configurable **NET ROI**.
+4. **Free-first, scalable later** — inexpensive MVP with provider abstractions ready for broader paid feeds.
 
-## V0.2
+## V0.3
 
-- Strict complete-outcome validation (prevents false 1X2 opportunities from incomplete feeds).
-- Net-cost model per bookmaker/exchange:
+- Strict complete-outcome validation, preventing false 1X2 positives from incomplete feeds.
+- Cost model per bookmaker/exchange:
   - commission on winnings;
-  - stake fee;
-  - fixed cost per leg;
-  - conservative quote slippage in basis points;
+  - stake fees and fixed costs;
+  - conservative slippage in basis points;
   - min/max stake limits.
-- Cost-aware optimiser enumerates bookmaker combinations instead of blindly choosing highest raw odds.
-- Optional per-bookmaker liquidity caps resize opportunities to the cash actually available on each account.
+- Cost-aware optimiser evaluates bookmaker combinations instead of blindly picking the highest raw odds.
+- Per-bookmaker liquidity caps resize surebets to cash actually available on each account.
 - Markets: H2H, 1X2, totals, spreads.
-- Scan-run IDs and quote history in SQLite.
-- Bankroll-aware historical backtest with capital locking until settlement, one trade per event/market and configurable minimum signal persistence.
-- Streamlit dashboard with latest scanner, backtest, cost-model and liquidity tabs.
-- CLI and CI tests.
+- SQLite shadow history for every scan and quote snapshot.
+- Configurable minimum signal persistence.
+- **Execution-latency backtest**: a signal must still exist on a later scan after the configured delay and is
+  repriced from that later snapshot.
+- Two settlement models:
+  - `guaranteed`: credits the mathematical guaranteed floor;
+  - `results`: requires an exact event+market result, moves cash out of each bookmaker wallet and credits the
+    winning return only to the winning bookmaker.
+- Exact settlement key = provider event id + full market signature, so different totals/spread lines cannot
+  accidentally settle one another.
+- Streamlit dashboard with scanner, execution-aware backtest, cost model, liquidity and settlement tabs.
+- CLI commands for scanning, shadow collection, backtest and result maintenance.
+- GitHub Actions CI.
 
 No automatic bet placement is implemented. The current objective is to prove that opportunities remain
-profitable **after** realistic execution assumptions before adding any execution-assistance layer.
+profitable **after realistic execution assumptions** before adding an execution-assistance layer.
 
 ## Math: gross vs net
 
@@ -47,9 +53,8 @@ S = sum(1 / q_i)
 S < 1
 ```
 
-Sportage does not stop there. For each bookmaker it applies configured slippage and commission to derive a
-net-return factor `a_i`. Stakes are chosen so every possible winning outcome returns the same net amount,
-while placement fees are included in the cash budget. The ranking and threshold use:
+Sportage derives net-return factors after configured execution costs and allocates stakes so the net return is
+equalised across all mutually exclusive outcomes. Qualification uses:
 
 ```text
 net_roi = guaranteed_net_profit / actual_capital_used
@@ -67,14 +72,17 @@ pytest -q
 ## Local demo
 
 ```bash
-sportage scan --provider mock --bankroll 1000 --min-net-roi 0.015 \
+sportage scan \
+  --provider mock \
+  --bankroll 1000 \
+  --min-net-roi 0.015 \
   --costs config/costs.example.json \
   --liquidity config/liquidity.example.json
 ```
 
 ## Shadow collection
 
-Free-first validation can use Odds-API.io. Event discovery is cached and odds for up to 10 events are fetched in one batch request:
+Free-first validation can use Odds-API.io. Event discovery is cached and odds are fetched in batches:
 
 ```bash
 export ODDS_API_IO_KEY="..."
@@ -87,18 +95,17 @@ sportage shadow \
   --interval 120
 ```
 
-For broader market coverage the existing The Odds API adapter supports H2H, spreads and totals:
+The existing The Odds API adapter supports H2H, spreads and totals:
 
 ```bash
 export THE_ODDS_API_KEY="..."
 sportage shadow --provider theoddsapi --markets h2h,spreads,totals --interval 30
 ```
 
-Both are behind `OddsProvider`, so a paid feed can replace or complement them without changing the arbitrage engine. The free-first adapter is for validation/shadow collection; two-bookmaker coverage should not be treated as production-grade arbitrage coverage.
+Both implement the same provider interface. A broader paid feed can therefore complement or replace them
+without changing the arbitrage engine.
 
-## Backtest
-
-After shadow history exists:
+## Guaranteed backtest
 
 ```bash
 sportage backtest \
@@ -108,22 +115,62 @@ sportage backtest \
   --stake-per-arb 500 \
   --min-net-roi 0.015 \
   --min-persistence-seconds 30 \
+  --execution-latency-seconds 15 \
+  --settlement-mode guaranteed \
   --costs config/costs.example.json \
   --liquidity config/liquidity.example.json
 ```
 
-Backtest rules in V0.2:
+This replay:
 
-- replay stored scans in chronological order;
-- re-run detection using the chosen current parameters;
-- never execute the same event+market twice;
-- optionally require a signal to remain above the NET threshold across successive scans for a minimum number of seconds; a disappearance resets the clock;
-- lock actual capital used until event time + settlement delay;
-- compound guaranteed returns as capital becomes available;
-- report realized cash, still-locked capital and projected guaranteed net;
-- when a liquidity file is supplied, enforce bookmaker-specific concurrent cash caps and report turnover plus peak locked outlay per bookmaker.
+- scans history in chronological order;
+- requires the signal to remain above the NET threshold for the configured persistence period;
+- waits for the configured execution latency and **reprices from the later scan**;
+- never executes the same event+market twice;
+- locks capital until settlement;
+- enforces bookmaker-specific concurrent cash requirements;
+- reports projected net, turnover, peak bookmaker outlay and rejection reasons.
 
-The current per-bookmaker backtest is a **working-capital model**: cash committed to an active position reduces the liquidity available on that bookmaker and is released at settlement. It assumes balances can be rebalanced after settlement. Exact outcome-dependent account paths will require a results/settlement feed.
+## Result-settled wallet backtest
+
+Store an exact result:
+
+```bash
+sportage result-set \
+  --db data/arbitrage.sqlite3 \
+  --event-id EVENT123 \
+  --market-signature "h2h:full_time:" \
+  --winning-outcome "Player A" \
+  --settled-at "2026-09-05T20:30:00+02:00" \
+  --source manual
+```
+
+Review stored settlements:
+
+```bash
+sportage results-list --db data/arbitrage.sqlite3
+```
+
+Then run:
+
+```bash
+sportage backtest \
+  --db data/arbitrage.sqlite3 \
+  --days 30 \
+  --initial-bankroll 5000 \
+  --stake-per-arb 500 \
+  --min-net-roi 0.015 \
+  --min-persistence-seconds 30 \
+  --execution-latency-seconds 15 \
+  --settlement-mode results \
+  --costs config/costs.example.json \
+  --liquidity config/liquidity.example.json
+```
+
+In `results` mode Sportage does **not** guess missing outcomes. A trade without an exact stored settlement is
+excluded from that backtest and counted as a missing-result rejection. When a result exists, losing leg
+outlays permanently reduce their bookmaker wallets and the winning leg's net return is credited to the
+winning bookmaker. Later trades therefore depend on the actual wallet distribution, not just total bankroll.
 
 ## UI
 
@@ -137,10 +184,12 @@ or:
 python -m streamlit run src/arbengine/ui_app.py
 ```
 
+The dashboard includes a Settlements tab so result records can be added without editing SQLite manually.
+
 ## Cost configuration
 
-`config/costs.example.json` is intentionally conservative. Actual values must be calibrated from observed
-execution and the fee schedule of each operator. Example:
+`config/costs.example.json` is intentionally conservative. Actual values should be calibrated from observed
+execution and each operator's fee schedule.
 
 ```json
 {
@@ -153,7 +202,7 @@ execution and the fee schedule of each operator. Example:
 
 ## Liquidity configuration
 
-`config/liquidity.example.json` models where the bankroll actually sits. This is separate from fees because balances change much more frequently than bookmaker cost rules.
+`config/liquidity.example.json` models where the bankroll actually sits:
 
 ```json
 {
@@ -166,44 +215,44 @@ execution and the fee schedule of each operator. Example:
 }
 ```
 
-`default_balance: 0` means only listed/funded accounts may be used. `null` leaves unlisted bookmakers unconstrained. The optimiser aggregates multiple legs placed at the same bookmaker before applying its cash cap.
+`default_balance: 0` means only listed/funded accounts may be used. `null` leaves unlisted bookmakers
+unconstrained.
 
 ## Architecture
 
 ```text
-Odds providers (free first; paid later)
-        |
-        v
-Normalized Quote + complete-market signature
-        |
-        +------> SQLite shadow history ------> Backtest
-        |
-        v
-Cost + liquidity aware arbitrage optimiser
-        |
-        v
-NET threshold / execution filters
-        |
-        +------> CLI
-        +------> Streamlit UI
-        +------> future alerts / execution assistant
+Odds providers
+      |
+      v
+Normalized quotes + exact market signatures
+      |
+      +------> SQLite shadow history --------> execution-aware backtest
+      |                                             |
+      |                                   settlement results / wallets
+      v
+Cost + liquidity aware optimiser
+      |
+      v
+NET threshold + persistence + latency filters
+      |
+      +------> CLI
+      +------> Streamlit dashboard
+      +------> future alerts / execution assistant
 ```
 
 ### Scale path
 
-The interfaces intentionally allow this progression without replacing the core:
-
 ```text
 SQLite       -> Postgres/Timescale
 polling      -> queues/streaming
-single API   -> multiple paid/free adapters
+free feeds   -> multiple premium/free adapters
 Streamlit    -> API + dedicated web frontend
 manual open  -> execution-assistance with preflight checks
 ```
 
 ## Important limitations before real-money use
 
-A mathematical surebet is not operationally guaranteed. The remaining model-risk items include quote
-latency, rejected legs, maximum stake changes, market-rule mismatches, void rules, settlement differences,
-account restrictions and data-source gaps. Shadow history exists specifically to measure these before the
-system is treated as production-ready.
+A mathematical surebet is not operationally guaranteed. Remaining model-risk items include data latency,
+rejected legs, bookmaker stake-limit changes, market-rule mismatches, void rules, partial feed coverage,
+account restrictions and real execution slippage. Shadow history and settlement-aware replay exist to measure
+these before Sportage is treated as production-ready.

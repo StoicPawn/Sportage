@@ -50,6 +50,34 @@ class Quote(BaseModel):
         return f"{self.market.value}:{self.period}:{line}"
 
 
+class SettlementResult(BaseModel):
+    """Observed settlement for one exact event+market signature.
+
+    `winning_outcome` must match the normalized outcome label used by the quote
+    adapters (team/player name, Draw, Over, Under, etc.). Results are keyed by
+    event id plus full market signature so totals/spreads with different lines
+    cannot accidentally settle each other.
+    """
+
+    event_id: str
+    market_signature: str
+    winning_outcome: str
+    settled_at: datetime
+    source: str = "manual"
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("settled_at", "observed_at")
+    @classmethod
+    def result_tz_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    @property
+    def event_market_key(self) -> str:
+        return f"{self.event_id}|{self.market_signature}"
+
+
 class CostProfile(BaseModel):
     """Conservative execution-cost assumptions for one bookmaker/exchange.
 

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sportage-arbitrage"
-version = "0.2.0"
-description = "Net sports-arbitrage scanner, shadow collector and historical backtest engine."
+version = "0.3.0"
+description = "Net sports-arbitrage scanner, shadow collector and execution-aware historical backtest engine."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

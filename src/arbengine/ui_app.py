@@ -11,6 +11,7 @@ from arbengine.backtest import BacktestConfig, run_backtest
 from arbengine.costs import load_cost_config
 from arbengine.engine import find_arbitrage
 from arbengine.liquidity import load_liquidity_config
+from arbengine.models import SettlementResult
 from arbengine.storage import SQLiteStore
 
 
@@ -27,7 +28,8 @@ st.markdown(
 )
 
 st.title("Sportage")
-st.caption("Net sports-arbitrage scanner · shadow history · configurable backtest")
+st.caption("Net sports-arbitrage scanner · shadow history · execution-aware backtest")
+
 
 def money(v: Decimal | float) -> str:
     return f"€{float(v):,.2f}"
@@ -35,6 +37,11 @@ def money(v: Decimal | float) -> str:
 
 def pct(v: Decimal | float) -> str:
     return f"{float(v):.2%}"
+
+
+def parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 with st.sidebar:
@@ -47,7 +54,7 @@ with st.sidebar:
     allocation = st.number_input("Capital per arbitrage (€)", min_value=1.0, value=500.0, step=50.0)
     min_net_roi = st.number_input("Minimum NET ROI", min_value=0.0, value=0.015, step=0.001, format="%.3f")
     max_age = st.number_input("Max quote age (seconds)", min_value=1.0, value=30.0, step=5.0)
-    st.caption("The threshold is applied after commission, fees and configured slippage.")
+    st.caption("Threshold is applied after commission, fees and configured slippage.")
 
 if not db_path.exists():
     st.info("No history database yet. Start shadow mode from the CLI, then refresh this page.")
@@ -59,13 +66,16 @@ liquidity_book = load_liquidity_config(liquidity_path)
 store = SQLiteStore(db_path)
 summary = store.summary()
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Completed scans", int(summary["scans"]))
 m2.metric("Quotes stored", int(summary["quotes"]))
 m3.metric("Signals stored", int(summary["opportunities"]))
-m4.metric("Best historical NET ROI", pct(float(summary["best_net_roi"])))
+m4.metric("Settlements", int(summary["settlements"]))
+m5.metric("Best historical NET ROI", pct(float(summary["best_net_roi"])))
 
-tab_live, tab_backtest, tab_costs, tab_liquidity = st.tabs(["Latest scanner", "Backtest", "Cost model", "Liquidity"])
+tab_live, tab_backtest, tab_costs, tab_liquidity, tab_settlements = st.tabs(
+    ["Latest scanner", "Backtest", "Cost model", "Liquidity", "Settlements"]
+)
 
 with tab_live:
     latest = store.latest_scan()
@@ -83,43 +93,68 @@ with tab_live:
             cost_book=cost_book,
             liquidity_book=liquidity_book,
         )
-        st.caption(f"Latest scan: {scan_time.isoformat()} · {len(quotes)} quotes · {len(opportunities)} qualifying surebets")
+        st.caption(
+            f"Latest scan: {scan_time.isoformat()} · {len(quotes)} quotes · "
+            f"{len(opportunities)} qualifying surebets"
+        )
         if not opportunities:
             st.success("No opportunity currently clears the configured NET threshold.")
         for opp in opportunities[:25]:
             with st.expander(
-                f"{opp.event} · {opp.market_signature} · NET {pct(opp.net_roi)} · {money(opp.guaranteed_profit)}",
+                f"{opp.event} · {opp.market_signature} · NET {pct(opp.net_roi)} · "
+                f"{money(opp.guaranteed_profit)}",
                 expanded=False,
             ):
-                c1, c2, c3, c4, c5 = st.columns(5)
+                c1, c2, c3, c4 = st.columns(4)
                 c1.metric("NET ROI", pct(opp.net_roi))
                 c2.metric("Gross ROI", pct(opp.gross_roi))
                 c3.metric("Capital used", money(opp.capital_used))
                 c4.metric("Guaranteed net", money(opp.guaranteed_profit))
-                rows = [
-                    {
-                        "Outcome": leg.outcome,
-                        "Bookmaker": leg.bookmaker,
-                        "Odds": float(leg.odds),
-                        "Effective odds": float(leg.effective_odds),
-                        "Stake €": float(leg.stake),
-                        "Cash outlay €": float(leg.cash_outlay),
-                        "Net return if win €": float(leg.net_return_if_win),
-                        "Quote age s": round(leg.quote_age_seconds, 1),
-                    }
-                    for leg in opp.legs
-                ]
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    [
+                        {
+                            "Outcome": leg.outcome,
+                            "Bookmaker": leg.bookmaker,
+                            "Odds": float(leg.odds),
+                            "Effective odds": float(leg.effective_odds),
+                            "Stake €": float(leg.stake),
+                            "Cash outlay €": float(leg.cash_outlay),
+                            "Net return if win €": float(leg.net_return_if_win),
+                            "Quote age s": round(leg.quote_age_seconds, 1),
+                        }
+                        for leg in opp.legs
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 with tab_backtest:
     st.subheader("Historical shadow backtest")
-    st.caption("Replays the stored quote snapshots with today's threshold and cost assumptions; it does not reuse the same event/market twice.")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    lookback = c1.number_input("Lookback days", min_value=1, value=30, step=1)
-    initial = c2.number_input("Initial bankroll (€)", min_value=1.0, value=5000.0, step=500.0)
-    bt_stake = c3.number_input("Max capital / arb (€)", min_value=1.0, value=float(allocation), step=50.0)
-    settlement = c4.number_input("Settlement delay (h)", min_value=0.0, value=3.0, step=0.5)
-    persistence = c5.number_input("Min signal persistence (s)", min_value=0.0, value=30.0, step=5.0)
+    st.caption(
+        "Replays stored snapshots. Persistence and latency require the surebet to remain valid; "
+        "results mode also moves bankroll between bookmaker wallets according to actual settlements."
+    )
+
+    r1, r2, r3, r4 = st.columns(4)
+    lookback = r1.number_input("Lookback days", min_value=1, value=30, step=1)
+    initial = r2.number_input("Initial bankroll (€)", min_value=1.0, value=5000.0, step=500.0)
+    bt_stake = r3.number_input("Max capital / arb (€)", min_value=1.0, value=float(allocation), step=50.0)
+    settlement_mode = r4.selectbox(
+        "Settlement model",
+        options=["guaranteed", "results"],
+        format_func=lambda x: "Guaranteed floor" if x == "guaranteed" else "Actual result / wallets",
+    )
+
+    r5, r6, r7 = st.columns(3)
+    settlement = r5.number_input("Settlement delay (h)", min_value=0.0, value=3.0, step=0.5)
+    persistence = r6.number_input("Min signal persistence (s)", min_value=0.0, value=30.0, step=5.0)
+    latency = r7.number_input("Execution latency (s)", min_value=0.0, value=15.0, step=5.0)
+
+    if settlement_mode == "results" and liquidity_path is None:
+        st.warning(
+            "Results mode is strongest with a liquidity file: without finite bookmaker balances, "
+            "Sportage can settle aggregate P&L but cannot constrain future trades by wallet cash."
+        )
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=int(lookback))
@@ -131,7 +166,9 @@ with tab_backtest:
             min_net_roi=Decimal(str(min_net_roi)),
             max_quote_age_seconds=max_age,
             settlement_hours=float(settlement),
+            settlement_mode=settlement_mode,
             min_signal_persistence_seconds=float(persistence),
+            execution_latency_seconds=float(latency),
             enforce_bookmaker_liquidity=liquidity_path is not None,
             start=start,
             end=end,
@@ -140,45 +177,81 @@ with tab_backtest:
         liquidity_book=liquidity_book,
     )
 
-    b1, b2, b3, b4, b5, b6, b7 = st.columns(7)
+    b1, b2, b3, b4, b5 = st.columns(5)
     b1.metric("Projected NET", money(result.projected_profit), pct(result.projected_return_pct))
     b2.metric("Executed arbs", len(result.trades))
     b3.metric("Signals seen", result.signals_seen)
-    b4.metric("Ending cash", money(result.ending_cash))
+    b4.metric("Ending aggregate cash", money(result.ending_cash))
     b5.metric("Capital still locked", money(result.locked_capital))
-    b6.metric("Rejected: too brief", result.signals_rejected_for_persistence)
-    b7.metric("Rejected: liquidity", result.signals_rejected_for_liquidity)
+
+    x1, x2, x3, x4 = st.columns(4)
+    x1.metric("Rejected: too brief", result.signals_rejected_for_persistence)
+    x2.metric("Rejected: latency", result.signals_rejected_for_latency)
+    x3.metric("Rejected: liquidity", result.signals_rejected_for_liquidity)
+    x4.metric("Rejected: missing result", result.signals_rejected_for_missing_result)
 
     if result.trades:
-        trade_rows = [
-            {
-                "First seen": t.first_seen_at.isoformat(),
-                "Executed": t.detected_at.isoformat(),
-                "Event": t.event,
-                "Market": t.market,
-                "Persistence s": round(t.persistence_seconds, 1),
-                "NET ROI": float(t.net_roi),
-                "Capital €": float(t.capital_used),
-                "Guaranteed net €": float(t.guaranteed_profit),
-                "Settlement": t.settle_at.isoformat(),
-            }
-            for t in result.trades
-        ]
-        st.dataframe(trade_rows, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [
+                {
+                    "First seen": t.first_seen_at.isoformat(),
+                    "Executed": t.detected_at.isoformat(),
+                    "Event": t.event,
+                    "Market": t.market,
+                    "Persistence s": round(t.persistence_seconds, 1),
+                    "Latency s": round(t.execution_latency_seconds, 1),
+                    "NET ROI floor": float(t.net_roi),
+                    "Capital €": float(t.capital_used),
+                    "Guaranteed net €": float(t.guaranteed_profit),
+                    "Winner": t.winning_outcome,
+                    "Settled net €": float(t.realized_profit),
+                    "Settlement": t.settle_at.isoformat(),
+                }
+                for t in result.trades
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
         st.info("No stored opportunity clears these parameters in the selected period.")
 
     if result.peak_locked_outlay_by_bookmaker:
         st.markdown("#### Bookmaker working-capital requirements")
-        rows = []
-        for bookmaker in sorted(set(result.peak_locked_outlay_by_bookmaker) | set(result.turnover_by_bookmaker)):
-            rows.append({
-                "Bookmaker": bookmaker,
-                "Peak concurrent outlay €": float(result.peak_locked_outlay_by_bookmaker.get(bookmaker, 0)),
-                "Period turnover €": float(result.turnover_by_bookmaker.get(bookmaker, 0)),
-            })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-        st.caption("Peak outlay is a prefunded working-capital requirement. The current model assumes account rebalancing is possible after settlement; outcome-dependent account balances require a results/settlement feed.")
+        st.dataframe(
+            [
+                {
+                    "Bookmaker": bookmaker,
+                    "Peak concurrent outlay €": float(
+                        result.peak_locked_outlay_by_bookmaker.get(bookmaker, 0)
+                    ),
+                    "Period turnover €": float(result.turnover_by_bookmaker.get(bookmaker, 0)),
+                }
+                for bookmaker in sorted(
+                    set(result.peak_locked_outlay_by_bookmaker) | set(result.turnover_by_bookmaker)
+                )
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if settlement_mode == "results" and result.ending_balance_by_bookmaker:
+        st.markdown("#### Bookmaker wallet evolution")
+        names = sorted(
+            set(result.starting_balance_by_bookmaker) | set(result.ending_balance_by_bookmaker)
+        )
+        st.dataframe(
+            [
+                {
+                    "Bookmaker": name,
+                    "Starting €": float(result.starting_balance_by_bookmaker.get(name, 0)),
+                    "Ending €": float(result.ending_balance_by_bookmaker.get(name, 0)),
+                    "Change €": float(result.balance_change_by_bookmaker.get(name, 0)),
+                }
+                for name in names
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with tab_costs:
     st.subheader("Execution cost assumptions")
@@ -200,27 +273,91 @@ with tab_costs:
         use_container_width=True,
         hide_index=True,
     )
-    st.code(
-        '{\n  "default": {"bookmaker": "*", "slippage_bps": 15},\n  "bookmakers": [\n    {"bookmaker": "Betfair Exchange", "commission_on_winnings_pct": 0.05}\n  ]\n}',
-        language="json",
-    )
 
 with tab_liquidity:
     st.subheader("Bookmaker liquidity")
-    st.caption("Optional live cash caps. When configured, Sportage resizes a surebet to the cash actually available at each bookmaker rather than assuming the bankroll is freely movable.")
+    st.caption(
+        "Optional prefunded cash caps. In results mode these become mutable wallets: losing legs reduce "
+        "their account balance and the winning return is credited only to the winning account."
+    )
     if liquidity_path is None:
-        st.info("No liquidity file configured. Scanner uses only the global bankroll and bookmaker stake limits.")
-        st.code("""{
+        st.info("No liquidity file configured. Scanner uses only global bankroll and bookmaker stake limits.")
+        st.code(
+            """{
   "default_balance": 0,
   "bookmakers": {
     "Book A": 300,
     "Book B": 300
   }
-}""")
+}"""
+        )
     else:
-        rows = [{"Bookmaker": name, "Available €": float(balance)} for name, balance in liquidity_book.explicit_balances().items()]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [
+                {"Bookmaker": name, "Available €": float(balance)}
+                for name, balance in liquidity_book.explicit_balances().items()
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
         default_balance = liquidity_book.config.default_balance
-        st.caption(f"Default balance for unlisted bookmakers: {default_balance if default_balance is not None else 'unconstrained'}")
+        st.caption(
+            "Default balance for unlisted bookmakers: "
+            f"{default_balance if default_balance is not None else 'unconstrained'}"
+        )
+
+with tab_settlements:
+    st.subheader("Event / market settlements")
+    st.caption(
+        "Results are keyed by provider event id + exact market signature. This prevents a totals/spread "
+        "line from accidentally settling a different line."
+    )
+    existing_results = store.list_settlement_results()
+    if existing_results:
+        st.dataframe(
+            [
+                {
+                    "Event id": item.event_id,
+                    "Market signature": item.market_signature,
+                    "Winning outcome": item.winning_outcome,
+                    "Settled at": item.settled_at.isoformat(),
+                    "Source": item.source,
+                }
+                for item in reversed(existing_results[-100:])
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No settlement results stored yet.")
+
+    st.markdown("#### Add or replace settlement")
+    with st.form("settlement_form"):
+        f1, f2 = st.columns(2)
+        event_id = f1.text_input("Event id")
+        market_signature = f2.text_input("Market signature", placeholder="h2h:full_time:")
+        f3, f4, f5 = st.columns(3)
+        winning_outcome = f3.text_input("Winning outcome")
+        settled_at_text = f4.text_input(
+            "Settled at (ISO-8601)", value=datetime.now(timezone.utc).isoformat()
+        )
+        result_source = f5.text_input("Source", value="manual")
+        submitted = st.form_submit_button("Save settlement", type="primary")
+        if submitted:
+            if not event_id or not market_signature or not winning_outcome:
+                st.error("Event id, market signature and winning outcome are required.")
+            else:
+                try:
+                    settlement_record = SettlementResult(
+                        event_id=event_id.strip(),
+                        market_signature=market_signature.strip(),
+                        winning_outcome=winning_outcome.strip(),
+                        settled_at=parse_iso(settled_at_text.strip()),
+                        source=result_source.strip() or "manual",
+                    )
+                    store.save_settlement_result(settlement_record)
+                    st.success(f"Saved {settlement_record.event_market_key}")
+                except Exception as exc:
+                    st.error(f"Invalid settlement: {exc}")
 
 store.close()
