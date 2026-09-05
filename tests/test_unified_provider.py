@@ -17,7 +17,7 @@ class StaticProvider(OddsProvider):
 
 def test_unified_provider_merges_same_event_across_sources(tmp_path):
     now = datetime.now(timezone.utc)
-    commence_a = now + timedelta(hours=2)
+    commence_a = (now + timedelta(hours=2)).replace(minute=1, second=0, microsecond=0)
     commence_b = commence_a + timedelta(seconds=75)
 
     q1 = Quote(
