@@ -45,7 +45,6 @@ CREATE TABLE IF NOT EXISTS quote_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_quote_event_market ON quote_snapshots(event_id, market);
 CREATE INDEX IF NOT EXISTS idx_quote_scan ON quote_snapshots(scan_id);
-CREATE INDEX IF NOT EXISTS idx_quote_operator_event ON quote_snapshots(operator_id, event_id);
 CREATE TABLE IF NOT EXISTS opportunities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_id INTEGER,
@@ -87,6 +86,9 @@ class SQLiteStore:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         self._migrate_legacy_schema()
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quote_operator_event ON quote_snapshots(operator_id, event_id)"
+        )
         self.conn.commit()
 
     def _columns(self, table: str) -> set[str]:
@@ -283,11 +285,9 @@ class SQLiteStore:
         clauses = ["status='ok'"]
         params: list[str] = []
         if start is not None:
-            clauses.append("started_at >= ?")
-            params.append(start.isoformat())
+            clauses.append("started_at >= ?"); params.append(start.isoformat())
         if end is not None:
-            clauses.append("started_at <= ?")
-            params.append(end.isoformat())
+            clauses.append("started_at <= ?"); params.append(end.isoformat())
         return list(self.conn.execute(
             f"SELECT * FROM scan_runs WHERE {' AND '.join(clauses)} ORDER BY started_at, id", params
         ))
