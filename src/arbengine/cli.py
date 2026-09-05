@@ -15,6 +15,7 @@ from .backtest import BacktestConfig, run_backtest
 from .costs import load_cost_config
 from .engine import find_arbitrage
 from .liquidity import load_liquidity_config
+from .models import SettlementResult
 from .providers.mock import MockProvider
 from .providers.odds_api_io import OddsApiIoProvider
 from .providers.the_odds_api import TheOddsAPIProvider
@@ -33,6 +34,15 @@ def _provider(name: str, markets: str = "h2h,spreads,totals"):
     if name == "oddsapiio":
         return OddsApiIoProvider()
     raise typer.BadParameter("provider must be 'mock', 'theoddsapi' or 'oddsapiio'")
+
+
+def _parse_datetime(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 @app.command()
@@ -100,6 +110,57 @@ def shadow(
     )
 
 
+@app.command("result-set")
+def result_set(
+    event_id: str = typer.Option(..., help="Provider event id"),
+    market_signature: str = typer.Option(..., help="Exact signature, e.g. h2h:full_time:"),
+    winning_outcome: str = typer.Option(..., help="Exact winning outcome label"),
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
+    settled_at: str | None = typer.Option(None, help="ISO-8601 settlement time; defaults to now"),
+    source: str = typer.Option("manual"),
+) -> None:
+    store = SQLiteStore(db)
+    try:
+        result = SettlementResult(
+            event_id=event_id,
+            market_signature=market_signature,
+            winning_outcome=winning_outcome,
+            settled_at=_parse_datetime(settled_at),
+            source=source,
+        )
+        store.save_settlement_result(result)
+    finally:
+        store.close()
+    console.print(
+        f"Saved settlement {result.event_market_key}: winner={result.winning_outcome} "
+        f"at {result.settled_at.isoformat()}"
+    )
+
+
+@app.command("results-list")
+def results_list(
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3")), exists=True),
+) -> None:
+    store = SQLiteStore(db)
+    try:
+        results = store.list_settlement_results()
+    finally:
+        store.close()
+    if not results:
+        console.print("No settlement results stored.")
+        return
+    table = Table("Event", "Market", "Winner", "Settled", "Source")
+    for result in results:
+        table.add_row(
+            result.event_id,
+            result.market_signature,
+            result.winning_outcome,
+            result.settled_at.isoformat(),
+            result.source,
+        )
+    console.print(table)
+
+
 @app.command("backtest")
 def backtest_command(
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3")), exists=True),
@@ -110,8 +171,18 @@ def backtest_command(
     costs: Path | None = typer.Option(None, exists=True),
     liquidity: Path | None = typer.Option(None, exists=True),
     settlement_hours: float = typer.Option(3.0, min=0.0),
+    settlement_mode: str = typer.Option("guaranteed", help="guaranteed or results"),
     min_persistence_seconds: float = typer.Option(0.0, min=0.0),
+    execution_latency_seconds: float = typer.Option(0.0, min=0.0),
 ) -> None:
+    if settlement_mode not in {"guaranteed", "results"}:
+        raise typer.BadParameter("settlement-mode must be 'guaranteed' or 'results'")
+    if settlement_mode == "results" and liquidity is None:
+        console.print(
+            "[yellow]Results mode without --liquidity tracks aggregate cash but cannot constrain "
+            "future trades by finite bookmaker wallets.[/yellow]"
+        )
+
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     store = SQLiteStore(db)
@@ -123,7 +194,9 @@ def backtest_command(
                 stake_per_opportunity=Decimal(str(stake_per_arb)),
                 min_net_roi=Decimal(str(min_net_roi)),
                 settlement_hours=settlement_hours,
+                settlement_mode=settlement_mode,
                 min_signal_persistence_seconds=min_persistence_seconds,
+                execution_latency_seconds=execution_latency_seconds,
                 enforce_bookmaker_liquidity=liquidity is not None,
                 start=start,
                 end=end,
@@ -139,8 +212,23 @@ def backtest_command(
         f"Projected net={result.projected_profit:.2f} ({result.projected_return_pct:.2%}) | "
         f"Realized={result.realized_profit:.2f} | "
         f"Persistence rejects={result.signals_rejected_for_persistence} | "
-        f"Liquidity rejects={result.signals_rejected_for_liquidity}"
+        f"Latency rejects={result.signals_rejected_for_latency} | "
+        f"Liquidity rejects={result.signals_rejected_for_liquidity} | "
+        f"Missing-result rejects={result.signals_rejected_for_missing_result}"
     )
+    if result.ending_balance_by_bookmaker:
+        balances = Table("Bookmaker", "Start", "End", "Delta")
+        names = sorted(
+            set(result.starting_balance_by_bookmaker) | set(result.ending_balance_by_bookmaker)
+        )
+        for name in names:
+            balances.add_row(
+                name,
+                str(result.starting_balance_by_bookmaker.get(name, Decimal("0"))),
+                str(result.ending_balance_by_bookmaker.get(name, Decimal("0"))),
+                str(result.balance_change_by_bookmaker.get(name, Decimal("0"))),
+            )
+        console.print(balances)
 
 
 @app.command()
