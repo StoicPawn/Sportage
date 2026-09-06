@@ -188,6 +188,30 @@ def _execution(operator_id: str, environment: str) -> ExecutionConnector:
     return build_execution_connector(operator_id)
 
 
+def _read_only_auth_probe(operator_id: str, connector: ExecutionConnector) -> dict[str, Any]:
+    if operator_id == "betfair":
+        # listCurrentOrders is authenticated but does not create/change an order.
+        response = connector.client.call("listCurrentOrders", {"orderProjection": "ALL"})  # type: ignore[attr-defined]
+        result = response.get("result") or {}
+        return {
+            "ok": True,
+            "message": "Betfair session authenticated; current orders endpoint readable.",
+            "current_order_count": len(result.get("currentOrders") or []),
+        }
+    if operator_id == "betflag":
+        client = connector.client  # type: ignore[attr-defined]
+        token = client.ensure_session()
+        client.request("PUT", "/security/keepalive", session=True)
+        return {
+            "ok": True,
+            "message": "BetFlag session authenticated and keepalive accepted.",
+            "environment": client.environment,
+            "session_present": bool(token),
+        }
+    probe = connector.certification_probe()
+    return dict(probe)
+
+
 class VenueCertifier:
     """Read-only/live-safe certification of an automatic execution venue.
 
@@ -236,7 +260,7 @@ class VenueCertifier:
 
         try:
             connector = self.execution_factory(operator_id, environment)
-            probe = connector.certification_probe()
+            probe = _read_only_auth_probe(operator_id, connector)
             probe_ok = bool(probe.get("ok", False))
             checks.append(
                 CertificationCheck(
@@ -256,7 +280,6 @@ class VenueCertifier:
                 )
             )
 
-        quotes: list[Quote] = []
         try:
             quotes = list(self.provider_factory(operator_id, environment).fetch_quotes())
             native = [
