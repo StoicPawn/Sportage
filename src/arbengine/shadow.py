@@ -7,7 +7,10 @@ from pathlib import Path
 from .costs import CostBook
 from .engine import find_arbitrage
 from .liquidity import LiquidityBook
+from .operators import OPERATORS
+from .provider_health_storage import ProviderHealthStore
 from .providers.base import OddsProvider
+from .providers.unified import UnifiedOperatorProvider
 from .scan_history import ScanHistory
 from .storage import SQLiteStore
 
@@ -23,6 +26,7 @@ def run_shadow_loop(
     iterations: int | None = None,
 ) -> None:
     store = SQLiteStore(db_path)
+    health_store = ProviderHealthStore(store.conn)
     history = ScanHistory(store)
     completed = 0
     provider_name = provider.__class__.__name__
@@ -30,10 +34,27 @@ def run_shadow_loop(
         while iterations is None or completed < iterations:
             session = history.start(provider_name)
             opportunities = []
+            coverage_text = ""
             try:
-                quotes = provider.fetch_quotes()
-                # Persist the normalized snapshot immediately. If later arbitrage
-                # processing fails, the quote history is still retained for replay.
+                if isinstance(provider, UnifiedOperatorProvider):
+                    report = provider.fetch_report()
+                    health_store.save_report(session.scan_id, report)
+                    if report.successful_source_count == 0:
+                        details = "; ".join(
+                            f"{item.source}: {item.error_type or 'error'} {item.error_message or ''}".strip()
+                            for item in report.source_health
+                        )
+                        raise RuntimeError(f"All configured market-data sources failed. {details}")
+                    quotes = report.quotes
+                    coverage_text = (
+                        f" | coverage={len(report.covered_operator_ids)}/{len(OPERATORS)}"
+                        f" | sources={report.successful_source_count} ok/{report.failed_source_count} failed"
+                    )
+                else:
+                    quotes = provider.fetch_quotes()
+
+                # Persist normalized snapshots before arbitrage processing so a later
+                # engine failure cannot erase the raw market-data history.
                 session.save_quotes(quotes)
                 opportunities = find_arbitrage(
                     quotes,
@@ -58,7 +79,7 @@ def run_shadow_loop(
                 print(
                     f"[ARB] scan={receipt.scan_id} {best.event} | NET ROI {best.net_roi:.4%} | "
                     f"gross {best.gross_roi:.4%} | net profit {best.guaranteed_profit} "
-                    f"on {best.capital_used}"
+                    f"on {best.capital_used}{coverage_text}"
                     + (
                         f" | liquidity-limited: {', '.join(best.limiting_bookmakers)}"
                         if best.liquidity_limited
@@ -69,7 +90,7 @@ def run_shadow_loop(
                 print(
                     f"[SCAN] id={receipt.scan_id} {receipt.quote_count} quotes | "
                     f"no net opportunity >= {min_net_roi:.2%} | "
-                    f"{receipt.duration_ms:.0f} ms"
+                    f"{receipt.duration_ms:.0f} ms{coverage_text}"
                 )
 
             completed += 1
