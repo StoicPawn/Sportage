@@ -92,6 +92,7 @@ class MarketDataConnector(ABC):
 
 class ExecutionConnector(ABC):
     operator_id: str
+    automatic_execution: bool = False
 
     def preflight(self, order: BetOrder) -> ExecutionPreflight:
         return ExecutionPreflight(
