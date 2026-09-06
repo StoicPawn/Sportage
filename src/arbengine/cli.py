@@ -19,6 +19,7 @@ from .engine import find_arbitrage
 from .liquidity import load_liquidity_config
 from .models import SettlementResult
 from .operators import operators_by_tier
+from .provider_health_storage import ProviderHealthStore
 from .providers.mock import MockProvider
 from .providers.odds_api_io import OddsApiIoProvider
 from .providers.the_odds_api import TheOddsAPIProvider
@@ -64,6 +65,60 @@ def operators_command() -> None:
             ", ".join(spec.domains),
         )
     console.print(table)
+
+
+@app.command("data-health")
+def data_health(
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3")), exists=True),
+) -> None:
+    store = SQLiteStore(db)
+    try:
+        health = ProviderHealthStore(store.conn)
+        sources = health.latest_source_health()
+        coverage = health.latest_operator_coverage()
+    finally:
+        store.close()
+
+    if not sources and not coverage:
+        console.print("No unified provider-health data stored yet. Run `sportage shadow --provider unified`.")
+        return
+
+    if sources:
+        table = Table("Source", "Status", "Duration ms", "Raw", "Normalized", "Operators", "Error")
+        for row in sources:
+            table.add_row(
+                row["source"],
+                row["status"],
+                f"{float(row['duration_ms']):.0f}",
+                str(row["raw_quote_count"]),
+                str(row["normalized_quote_count"]),
+                str(row["operator_count"]),
+                "" if row["error_type"] is None else f"{row['error_type']}: {row['error_message'] or ''}",
+            )
+        console.print(table)
+
+    covered = {row["operator_id"] for row in coverage}
+    specs = operators_by_tier(1, 2)
+    spec_by_id = {spec.operator_id: spec for spec in specs}
+    coverage_table = Table("Tier", "Operator", "Quotes", "Events", "Markets", "Sources", "Oldest age s")
+    for row in coverage:
+        spec = spec_by_id.get(row["operator_id"])
+        coverage_table.add_row(
+            str(spec.tier if spec else "?"),
+            spec.display_name if spec else row["operator_id"],
+            str(row["quote_count"]),
+            str(row["event_count"]),
+            str(row["market_count"]),
+            str(row["source_count"]),
+            f"{float(row['oldest_quote_age_seconds']):.1f}",
+        )
+    console.print(coverage_table)
+
+    missing = [spec.display_name for spec in specs if spec.operator_id not in covered]
+    console.print(
+        f"Coverage: {len(covered)}/{len(specs)} Tier 1/2 operators"
+        + (f" | Missing: {', '.join(missing)}" if missing else " | Full configured universe covered")
+    )
 
 
 @app.command("execution-preflight")
