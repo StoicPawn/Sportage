@@ -94,6 +94,18 @@ class ExecutionConnector(ABC):
     operator_id: str
     automatic_execution: bool = False
 
+    def certification_probe(self) -> dict[str, Any]:
+        """Perform a read-only authentication/account probe for live readiness.
+
+        Automatic connectors should override this with a venue-native call that
+        authenticates the configured session without placing, cancelling or mutating
+        any order. Manual connectors intentionally fail certification by default.
+        """
+        return {
+            "ok": False,
+            "message": "Connector has no read-only certification probe.",
+        }
+
     def preflight(self, order: BetOrder) -> ExecutionPreflight:
         return ExecutionPreflight(
             operator_id=self.operator_id,
