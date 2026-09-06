@@ -35,7 +35,7 @@ def rows_to_frame(rows):
                 "Net lifecycles": row.lifecycles,
                 "Median lifetime s": round(row.median_duration_seconds, 1),
                 "Max lifetime s": round(row.max_duration_seconds, 1),
-                "Max NET ROI": None if row.max_net_roi is None else float(row.max_net_roi),
+                "Max NET ROI %": None if row.max_net_roi is None else float(row.max_net_roi) * 100.0,
             }
             for row in rows
         ]
@@ -131,7 +131,7 @@ survival_df = pd.DataFrame(
 c1, c2 = st.columns([1.4, 1.0])
 with c1:
     chart_df = survival_df.set_index("Seconds")[["Survival %"]]
-    st.bar_chart(chart_df, y_label="Survival %", x_label="Required execution time (s)")
+    st.bar_chart(chart_df)
 with c2:
     st.dataframe(survival_df, use_container_width=True, hide_index=True)
 
@@ -157,7 +157,7 @@ with tab_sport:
             sport_df,
             use_container_width=True,
             hide_index=True,
-            column_config={"Max NET ROI": st.column_config.NumberColumn(format="%.2%%")},
+            column_config={"Max NET ROI %": st.column_config.NumberColumn(format="%.2f%%")},
         )
 
 with tab_market:
@@ -169,7 +169,7 @@ with tab_market:
             market_df,
             use_container_width=True,
             hide_index=True,
-            column_config={"Max NET ROI": st.column_config.NumberColumn(format="%.2%%")},
+            column_config={"Max NET ROI %": st.column_config.NumberColumn(format="%.2f%%")},
         )
 
 with tab_book:
@@ -181,7 +181,7 @@ with tab_book:
             book_df,
             use_container_width=True,
             hide_index=True,
-            column_config={"Max NET ROI": st.column_config.NumberColumn(format="%.2%%")},
+            column_config={"Max NET ROI %": st.column_config.NumberColumn(format="%.2f%%")},
         )
         st.caption(
             "A lifecycle can involve multiple bookmakers, so bookmaker counts are not mutually exclusive. "
