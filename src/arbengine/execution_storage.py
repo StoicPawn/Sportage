@@ -106,6 +106,12 @@ class ExecutionStore:
         self.conn.commit()
 
     def create_run(self, execution_id: str, event_market_key: str, status: str, live: bool, plan: dict[str, Any]) -> None:
+        if live:
+            # This gate lives below the CLI/coordinator boundary so a caller cannot
+            # create an oversized live run by bypassing the normal command path.
+            from .canary import CanaryGuard
+
+            CanaryGuard(self.conn).assert_plan(plan)
         now = self._now()
         self.conn.execute(
             """INSERT INTO execution_runs
