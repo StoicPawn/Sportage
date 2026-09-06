@@ -78,3 +78,26 @@ def test_fetch_quotes_raises_only_when_every_source_failed():
 
     with pytest.raises(RuntimeError, match="All configured market-data sources failed"):
         provider.fetch_quotes()
+
+
+def test_latest_coverage_does_not_leak_from_previous_successful_scan(tmp_path):
+    store = SQLiteStore(tmp_path / "aligned.sqlite3")
+    health = ProviderHealthStore(store.conn)
+
+    good_report = UnifiedOperatorProvider([GoodProvider()]).fetch_report()
+    good_scan = store.begin_scan("UnifiedOperatorProvider")
+    health.save_report(good_scan, good_report)
+    assert health.latest_operator_coverage()
+
+    failed_report = UnifiedOperatorProvider([FailingProvider()]).fetch_report()
+    failed_scan = store.begin_scan("UnifiedOperatorProvider")
+    health.save_report(failed_scan, failed_report)
+
+    latest_sources = health.latest_source_health()
+    latest_coverage = health.latest_operator_coverage()
+    store.close()
+
+    assert latest_sources
+    assert all(row["scan_id"] == failed_scan for row in latest_sources)
+    assert all(row["status"] == "error" for row in latest_sources)
+    assert latest_coverage == []
