@@ -10,7 +10,6 @@ from .liquidity import LiquidityBook
 from .operators import OPERATORS
 from .provider_health_storage import ProviderHealthStore
 from .providers.base import OddsProvider
-from .providers.unified import UnifiedOperatorProvider
 from .scan_history import ScanHistory
 from .storage import SQLiteStore
 
@@ -30,16 +29,22 @@ def run_shadow_loop(
     history = ScanHistory(store)
     completed = 0
     provider_name = provider.__class__.__name__
+
+    attach_budget = getattr(provider, "attach_budget_connection", None)
+    if callable(attach_budget):
+        attach_budget(store.conn)
+
     try:
         while iterations is None or completed < iterations:
             session = history.start(provider_name)
             opportunities = []
             coverage_text = ""
             try:
-                if isinstance(provider, UnifiedOperatorProvider):
-                    report = provider.fetch_report()
+                fetch_report = getattr(provider, "fetch_report", None)
+                if callable(fetch_report):
+                    report = fetch_report()
                     health_store.save_report(session.scan_id, report)
-                    if report.successful_source_count == 0:
+                    if report.source_health and all(item.status == "error" for item in report.source_health):
                         details = "; ".join(
                             f"{item.source}: {item.error_type or 'error'} {item.error_message or ''}".strip()
                             for item in report.source_health
@@ -48,13 +53,17 @@ def run_shadow_loop(
                     quotes = report.quotes
                     coverage_text = (
                         f" | coverage={len(report.covered_operator_ids)}/{len(OPERATORS)}"
-                        f" | sources={report.successful_source_count} ok/{report.failed_source_count} failed"
+                        f" | fresh={report.successful_source_count}"
+                        f" cached={report.cached_source_count}"
+                        f" failed={report.failed_source_count}"
                     )
+                    snapshot = getattr(provider, "last_snapshot", None)
+                    if snapshot is not None:
+                        gap = "n/a" if snapshot.best_implied_gap is None else f"{snapshot.best_implied_gap:.3%}"
+                        coverage_text += f" | mode={snapshot.mode} near-gap={gap}"
                 else:
                     quotes = provider.fetch_quotes()
 
-                # Persist normalized snapshots before arbitrage processing so a later
-                # engine failure cannot erase the raw market-data history.
                 session.save_quotes(quotes)
                 opportunities = find_arbitrage(
                     quotes,
