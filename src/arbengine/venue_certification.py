@@ -188,7 +188,12 @@ def _execution(operator_id: str, environment: str) -> ExecutionConnector:
     return build_execution_connector(operator_id)
 
 
-def _read_only_auth_probe(operator_id: str, connector: ExecutionConnector) -> dict[str, Any]:
+def _read_only_auth_probe(
+    operator_id: str,
+    connector: ExecutionConnector,
+    *,
+    market_id: str | None = None,
+) -> dict[str, Any]:
     if operator_id == "betfair":
         # listCurrentOrders is authenticated but does not create/change an order.
         response = connector.client.call("listCurrentOrders", {"orderProjection": "ALL"})  # type: ignore[attr-defined]
@@ -199,14 +204,16 @@ def _read_only_auth_probe(operator_id: str, connector: ExecutionConnector) -> di
             "current_order_count": len(result.get("currentOrders") or []),
         }
     if operator_id == "betflag":
+        if not market_id:
+            return {"ok": False, "message": "BetFlag auth probe needs a current market id."}
         client = connector.client  # type: ignore[attr-defined]
-        token = client.ensure_session()
-        client.request("PUT", "/security/keepalive", session=True)
+        data = client.request("GET", f"/offers/all/{market_id}", session=True)
+        rows = ((data.get("offerte") or {}).get("o") or []) if isinstance(data, dict) else []
         return {
             "ok": True,
-            "message": "BetFlag session authenticated and keepalive accepted.",
+            "message": "BetFlag session authenticated; account offers endpoint readable.",
             "environment": client.environment,
-            "session_present": bool(token),
+            "visible_account_offer_count": len(rows),
         }
     probe = connector.certification_probe()
     return dict(probe)
@@ -260,21 +267,11 @@ class VenueCertifier:
 
         try:
             connector = self.execution_factory(operator_id, environment)
-            probe = _read_only_auth_probe(operator_id, connector)
-            probe_ok = bool(probe.get("ok", False))
-            checks.append(
-                CertificationCheck(
-                    name="authenticated_session",
-                    ok=probe_ok,
-                    message=str(probe.get("message") or "Authentication probe completed."),
-                    details={k: v for k, v in probe.items() if k not in {"ok", "message"}},
-                )
-            )
         except Exception as exc:
             connector = None
             checks.append(
                 CertificationCheck(
-                    name="authenticated_session",
+                    name="connector_init",
                     ok=False,
                     message=f"{type(exc).__name__}: {exc}",
                 )
@@ -310,6 +307,35 @@ class VenueCertifier:
                     name="direct_market_data",
                     ok=False,
                     message=f"{type(exc).__name__}: {exc}",
+                )
+            )
+
+        if connector is not None:
+            try:
+                market_id = native[0].source_market_id if native else None
+                probe = _read_only_auth_probe(operator_id, connector, market_id=market_id)
+                checks.append(
+                    CertificationCheck(
+                        name="authenticated_session",
+                        ok=bool(probe.get("ok", False)),
+                        message=str(probe.get("message") or "Authentication probe completed."),
+                        details={k: v for k, v in probe.items() if k not in {"ok", "message"}},
+                    )
+                )
+            except Exception as exc:
+                checks.append(
+                    CertificationCheck(
+                        name="authenticated_session",
+                        ok=False,
+                        message=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+        else:
+            checks.append(
+                CertificationCheck(
+                    name="authenticated_session",
+                    ok=False,
+                    message="Skipped because connector initialization failed.",
                 )
             )
 
@@ -358,7 +384,7 @@ class VenueCertifier:
                 CertificationCheck(
                     name="execution_preflight",
                     ok=False,
-                    message="Skipped because authentication or executable market data failed.",
+                    message="Skipped because executable market data or connector initialization failed.",
                 )
             )
 
