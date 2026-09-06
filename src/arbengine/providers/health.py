@@ -40,7 +40,22 @@ class ProviderFetchReport:
 
     @property
     def successful_source_count(self) -> int:
+        """Sources freshly fetched successfully during this tick."""
         return sum(1 for item in self.source_health if item.status == "ok")
+
+    @property
+    def cached_source_count(self) -> int:
+        return sum(
+            1
+            for item in self.source_health
+            if item.status in {"cached", "budget_exhausted", "disabled", "unconfigured"}
+            and item.normalized_quote_count > 0
+        )
+
+    @property
+    def usable_source_count(self) -> int:
+        """Fresh or cached sources that currently contribute normalized quotes."""
+        return sum(1 for item in self.source_health if item.normalized_quote_count > 0)
 
     @property
     def failed_source_count(self) -> int:
@@ -52,4 +67,4 @@ class ProviderFetchReport:
 
     @property
     def partial_failure(self) -> bool:
-        return self.successful_source_count > 0 and self.failed_source_count > 0
+        return self.usable_source_count > 0 and self.failed_source_count > 0

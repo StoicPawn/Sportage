@@ -23,8 +23,10 @@ from .operators import operators_by_tier
 from .provider_health_storage import ProviderHealthStore
 from .providers.mock import MockProvider
 from .providers.odds_api_io import OddsApiIoProvider
+from .providers.scheduler import build_adaptive_provider, load_scheduler_config
 from .providers.the_odds_api import TheOddsAPIProvider
 from .providers.unified import build_unified_provider
+from .scheduler_storage import SchedulerBudgetStore
 from .shadow import run_shadow_loop
 from .storage import SQLiteStore
 
@@ -32,7 +34,12 @@ app = typer.Typer(no_args_is_help=True)
 console = Console()
 
 
-def _provider(name: str, markets: str = "h2h,spreads,totals"):
+def _provider(
+    name: str,
+    markets: str = "h2h,spreads,totals",
+    *,
+    scheduler_config: Path | None = None,
+):
     if name == "mock":
         return MockProvider()
     if name == "theoddsapi":
@@ -41,7 +48,14 @@ def _provider(name: str, markets: str = "h2h,spreads,totals"):
         return OddsApiIoProvider()
     if name == "unified":
         return build_unified_provider()
-    raise typer.BadParameter("provider must be 'mock', 'theoddsapi', 'oddsapiio' or 'unified'")
+    if name == "adaptive":
+        config = scheduler_config or Path(
+            os.getenv("SPORTAGE_SCHEDULER_CONFIG", "config/provider_scheduler.example.json")
+        )
+        return build_adaptive_provider(config, markets=markets)
+    raise typer.BadParameter(
+        "provider must be 'mock', 'theoddsapi', 'oddsapiio', 'unified' or 'adaptive'"
+    )
 
 
 def _parse_datetime(value: str | None) -> datetime:
@@ -81,7 +95,7 @@ def data_health(
         store.close()
 
     if not sources and not coverage:
-        console.print("No unified provider-health data stored yet. Run `sportage shadow --provider unified`.")
+        console.print("No unified provider-health data stored yet. Run shadow mode first.")
         return
 
     if sources:
@@ -122,6 +136,40 @@ def data_health(
     )
 
 
+@app.command("scheduler-status")
+def scheduler_status(
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3")), exists=True),
+    config: Path = typer.Option(
+        Path(os.getenv("SPORTAGE_SCHEDULER_CONFIG", "config/provider_scheduler.example.json")),
+        exists=True,
+    ),
+) -> None:
+    cfg = load_scheduler_config(config)
+    store = SQLiteStore(db)
+    try:
+        budget = SchedulerBudgetStore(store.conn)
+        states = {state.source: state for state in budget.list_states()}
+    finally:
+        store.close()
+
+    table = Table("Source", "Mode policy", "Today calls", "Month units", "Next due", "Last status")
+    for source, policy in cfg.sources.items():
+        state = states.get(source)
+        cadence = (
+            f"{policy.base_interval_seconds:g}s / "
+            f"{policy.near_event_interval_seconds:g}s / {policy.hot_interval_seconds:g}s"
+        )
+        table.add_row(
+            source,
+            cadence,
+            str(state.day_calls if state else 0),
+            f"{state.month_units:g}" if state else "0",
+            state.next_due_at.isoformat() if state and state.next_due_at else "now/not recorded",
+            state.last_status or "-" if state else "-",
+        )
+    console.print(table)
+
+
 @app.command("execution-preflight")
 def execution_preflight(
     operator: str = typer.Option(...),
@@ -150,8 +198,9 @@ def scan(
     costs: Path | None = typer.Option(None, exists=True),
     liquidity: Path | None = typer.Option(None, exists=True),
     markets: str = typer.Option("h2h,spreads,totals"),
+    scheduler_config: Path | None = typer.Option(None, exists=True),
 ) -> None:
-    quotes = _provider(provider, markets=markets).fetch_quotes()
+    quotes = _provider(provider, markets=markets, scheduler_config=scheduler_config).fetch_quotes()
     opportunities = find_arbitrage(
         quotes,
         bankroll=Decimal(str(bankroll)),
@@ -185,24 +234,27 @@ def scan(
 
 @app.command()
 def shadow(
-    provider: str = typer.Option("unified"),
+    provider: str = typer.Option("adaptive"),
     bankroll: float = typer.Option(float(os.getenv("ARB_BANKROLL", "1000")), min=0.01),
     min_net_roi: float = typer.Option(float(os.getenv("ARB_MIN_NET_ROI", "0.015")), min=0.0),
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
     costs: Path | None = typer.Option(None, exists=True),
     liquidity: Path | None = typer.Option(None, exists=True),
     markets: str = typer.Option("h2h,spreads,totals"),
-    interval: float = typer.Option(30.0, min=1.0),
+    scheduler_config: Path | None = typer.Option(None, exists=True),
+    interval: float | None = typer.Option(None, min=1.0),
     iterations: int | None = typer.Option(None, min=1),
 ) -> None:
+    provider_obj = _provider(provider, markets=markets, scheduler_config=scheduler_config)
+    effective_interval = interval if interval is not None else float(getattr(provider_obj, "tick_seconds", 30.0))
     run_shadow_loop(
-        provider=_provider(provider, markets=markets),
+        provider=provider_obj,
         db_path=db,
         bankroll=Decimal(str(bankroll)),
         min_net_roi=Decimal(str(min_net_roi)),
         cost_book=load_cost_config(costs),
         liquidity_book=load_liquidity_config(liquidity),
-        interval_seconds=interval,
+        interval_seconds=effective_interval,
         iterations=iterations,
     )
 

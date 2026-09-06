@@ -1,0 +1,41 @@
+{
+  "tick_seconds": 5,
+  "near_event_window_seconds": 7200,
+  "hot_implied_gap": 0.02,
+  "max_workers": 3,
+  "sources": {
+    "betfair": {
+      "enabled": true,
+      "base_interval_seconds": 30,
+      "near_event_interval_seconds": 10,
+      "hot_interval_seconds": 3,
+      "error_retry_seconds": 30,
+      "daily_call_limit": null,
+      "monthly_unit_limit": null,
+      "units_per_call": 1,
+      "max_cache_age_seconds": 120
+    },
+    "odds_api_io": {
+      "enabled": true,
+      "base_interval_seconds": 300,
+      "near_event_interval_seconds": 120,
+      "hot_interval_seconds": 60,
+      "error_retry_seconds": 120,
+      "daily_call_limit": 480,
+      "monthly_unit_limit": null,
+      "units_per_call": 1,
+      "max_cache_age_seconds": 600
+    },
+    "the_odds_api": {
+      "enabled": true,
+      "base_interval_seconds": 21600,
+      "near_event_interval_seconds": 3600,
+      "hot_interval_seconds": 900,
+      "error_retry_seconds": 600,
+      "daily_call_limit": null,
+      "monthly_unit_limit": 450,
+      "units_per_call": 3,
+      "max_cache_age_seconds": 1800
+    }
+  }
+}
