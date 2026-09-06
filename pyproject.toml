@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sportage-arbitrage"
-version = "0.13.0"
-description = "Net sports-arbitrage scanner with certified/funded live execution and independent multi-exchange rescue routing."
+version = "0.14.0"
+description = "Net sports-arbitrage scanner with certified/funded canary live execution and independent rescue routing."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -23,6 +23,7 @@ ui = ["streamlit>=1.37,<2", "pandas>=2.2,<3"]
 arbengine = "arbengine.cli:app"
 sportage = "arbengine.cli:app"
 sportage-exec = "arbengine.execution_cli:app"
+sportage-canary = "arbengine.canary_cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/arbengine"]
