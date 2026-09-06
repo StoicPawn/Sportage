@@ -6,7 +6,7 @@ from pathlib import Path
 
 from arbengine.operators import operator_spec
 
-from .base import BetOrder, ExecutionConnector, ExecutionPreflight, ExecutionResult, ExecutionStatus
+from .base import AccountSnapshot, BetOrder, ExecutionConnector, ExecutionPreflight, ExecutionResult, ExecutionStatus
 from .betfair import BetfairExchangeExecutionConnector
 from .betflag import BetFlagExchangeExecutionConnector
 from .execution_health import execution_available, mark_unhealthy
@@ -25,7 +25,6 @@ from .manual_retail import (
     WinamaxExecutionConnector,
 )
 
-# Only verified official APIs may advertise automatic execution.
 BetfairExchangeExecutionConnector.automatic_execution = True
 BetFlagExchangeExecutionConnector.automatic_execution = True
 
@@ -54,20 +53,18 @@ def _cooldown_seconds() -> float:
         return 60.0
 
 
-def _live_certification_required() -> bool:
-    return os.getenv("SPORTAGE_REQUIRE_LIVE_CERTIFICATION", "true").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+def _enabled(name: str, default: str = "true") -> bool:
+    return os.getenv(name, default).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _live_certification_valid(operator_id: str) -> tuple[bool, str]:
-    """Read the durable certification gate lazily to avoid connector import cycles."""
-    if not _live_certification_required():
+    if not _enabled("SPORTAGE_REQUIRE_LIVE_CERTIFICATION"):
         return True, "Live certification gate explicitly disabled."
     from arbengine.venue_certification import VenueCertificationStore, execution_environment
+
+    environment = execution_environment(operator_id)
+    if operator_id == "betflag" and environment != "production":
+        return False, "BetFlag staging is test-only and cannot hedge/rescue real-money live execution."
 
     db = Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))
     db.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +72,6 @@ def _live_certification_valid(operator_id: str) -> tuple[bool, str]:
     conn.row_factory = sqlite3.Row
     try:
         store = VenueCertificationStore(conn)
-        environment = execution_environment(operator_id)
         report = store.latest(operator_id, environment)
         if report is None:
             return False, f"No venue certification for {operator_id}/{environment}."
@@ -88,8 +84,32 @@ def _live_certification_valid(operator_id: str) -> tuple[bool, str]:
         conn.close()
 
 
+def _live_order_funded(operator_id: str, order: BetOrder) -> tuple[bool, str, AccountSnapshot | None]:
+    if not _enabled("SPORTAGE_REQUIRE_ACCOUNT_FUNDS"):
+        return True, "Account funds gate explicitly disabled.", None
+    from arbengine.account_funds import AccountSnapshotStore, assert_order_funded, refresh_account_snapshot
+
+    db = Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        store = AccountSnapshotStore(conn)
+        snapshot = refresh_account_snapshot(operator_id, store)
+        required = assert_order_funded(order, snapshot)
+        return (
+            True,
+            f"{operator_id} free balance {snapshot.available_balance:.2f}; order liability {required:.2f}.",
+            snapshot,
+        )
+    except Exception as exc:
+        return False, f"Account funds check failed: {type(exc).__name__}: {exc}", None
+    finally:
+        conn.close()
+
+
 class HealthTrackedExecutionConnector(ExecutionConnector):
-    """Automatic connector wrapper with circuit breaker and durable live certification gate."""
+    """Official automatic connector with certification, funds and circuit-breaker gates."""
 
     def __init__(self, inner: ExecutionConnector) -> None:
         self.inner = inner
@@ -100,6 +120,11 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
 
     def certification_probe(self):
         return self.inner.certification_probe()
+
+    def account_snapshot(self) -> AccountSnapshot:
+        from arbengine.account_funds import refresh_account_snapshot
+
+        return refresh_account_snapshot(self.operator_id)
 
     def _trip(self, reason: str) -> None:
         if getattr(self.inner, "automatic_execution", False):
@@ -136,6 +161,17 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
                     requested_stake=order.stake,
                     requested_odds=order.limit_odds,
                 )
+            funded, funding_reason, _ = _live_order_funded(self.operator_id, order)
+            if not funded:
+                self._trip(f"live account funds gate: {funding_reason}")
+                return ExecutionResult(
+                    operator_id=self.operator_id,
+                    status=ExecutionStatus.REJECTED,
+                    message=f"Live execution blocked: {funding_reason}",
+                    customer_order_ref=order.customer_order_ref,
+                    requested_stake=order.stake,
+                    requested_odds=order.limit_odds,
+                )
         try:
             result = self.inner.place_order(order, live=live)
         except Exception as exc:
@@ -159,8 +195,6 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
         market_id: str | None = None,
         order: BetOrder | None = None,
     ) -> ExecutionResult:
-        # BetFlag can use original market/order context because its public API has no
-        # documented client idempotency key. Betfair reconciles directly by customerOrderRef.
         if self.operator_id == "betflag":
             return self.inner.reconcile_order(
                 bet_id=bet_id,
@@ -180,8 +214,7 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
         market_id: str | None = None,
         live: bool = False,
     ) -> ExecutionResult:
-        # Cancellation/reconciliation remain available even when certification expires;
-        # emergency risk reduction must never be blocked by a readiness gate.
+        # Never block risk reduction on certification or balance state.
         return self.inner.cancel_order(bet_id, market_id=market_id, live=live)
 
 
