@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sportage-arbitrage"
-version = "0.7.0"
-description = "Net sports-arbitrage scanner with adaptive provider scheduling, market-signal lifecycle analytics and execution-aware backtesting."
+version = "0.8.0"
+description = "Net sports-arbitrage scanner with adaptive scheduling, lifecycle control-center analytics and execution-aware backtesting."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.6,<1"]
-ui = ["streamlit>=1.37,<2"]
+ui = ["streamlit>=1.37,<2", "pandas>=2.2,<3"]
 
 [project.scripts]
 arbengine = "arbengine.cli:app"
