@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -61,6 +62,19 @@ class ExecutionPreflight(BaseModel):
     raw: dict[str, Any] | list[Any] | None = None
 
 
+class AccountSnapshot(BaseModel):
+    operator_id: str
+    environment: str
+    available_balance: Decimal = Field(ge=0)
+    total_balance: Decimal | None = Field(default=None, ge=0)
+    locked_balance: Decimal | None = Field(default=None, ge=0)
+    exposure: Decimal | None = None
+    exposure_limit: Decimal | None = None
+    retained_commission: Decimal | None = None
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    raw: dict[str, Any] | list[Any] | None = None
+
+
 class ExecutionResult(BaseModel):
     operator_id: str
     status: ExecutionStatus
@@ -82,6 +96,13 @@ class ExecutionResult(BaseModel):
         return self.matched_stake >= self.requested_stake
 
 
+def required_account_funds(order: BetOrder) -> Decimal:
+    """Cash/liability that must be available before submitting one exchange order."""
+    if order.side == BetSide.LAY:
+        return order.stake * (order.limit_odds - Decimal("1"))
+    return order.stake
+
+
 class MarketDataConnector(ABC):
     operator_id: str
 
@@ -95,16 +116,13 @@ class ExecutionConnector(ABC):
     automatic_execution: bool = False
 
     def certification_probe(self) -> dict[str, Any]:
-        """Perform a read-only authentication/account probe for live readiness.
-
-        Automatic connectors should override this with a venue-native call that
-        authenticates the configured session without placing, cancelling or mutating
-        any order. Manual connectors intentionally fail certification by default.
-        """
         return {
             "ok": False,
             "message": "Connector has no read-only certification probe.",
         }
+
+    def account_snapshot(self) -> AccountSnapshot:
+        raise NotImplementedError(f"Account funds are not implemented for {self.operator_id}")
 
     def preflight(self, order: BetOrder) -> ExecutionPreflight:
         return ExecutionPreflight(
