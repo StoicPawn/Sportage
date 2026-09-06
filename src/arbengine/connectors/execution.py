@@ -115,11 +115,18 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
         market_id: str | None = None,
         order: BetOrder | None = None,
     ) -> ExecutionResult:
+        # BetFlag can use original market/order context because its public API has no
+        # documented client idempotency key. Betfair reconciles directly by customerOrderRef.
+        if self.operator_id == "betflag":
+            return self.inner.reconcile_order(
+                bet_id=bet_id,
+                customer_order_ref=customer_order_ref,
+                market_id=market_id,
+                order=order,
+            )
         return self.inner.reconcile_order(
             bet_id=bet_id,
             customer_order_ref=customer_order_ref,
-            market_id=market_id,
-            order=order,
         )
 
     def cancel_order(
