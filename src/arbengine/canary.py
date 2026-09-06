@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .connectors.base import BetOrder, BetSide, required_account_funds
+from .connectors.base import BetOrder, required_account_funds
 
 
 CANARY_SCHEMA = """
@@ -47,13 +47,22 @@ class CanaryPolicy(BaseModel):
     max_daily_api_liability: Decimal = Field(default=Decimal("30.00"), gt=0)
 
 
+def _env_enabled(name: str, default: str = "true") -> bool:
+    return os.getenv(name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
 def load_canary_policy(path: str | Path | None = None) -> CanaryPolicy:
     if path is None:
         path = os.getenv("SPORTAGE_CANARY_POLICY", "config/canary_policy.example.json")
     candidate = Path(path)
-    if not candidate.exists():
-        return CanaryPolicy()
-    return CanaryPolicy.model_validate(json.loads(candidate.read_text(encoding="utf-8")))
+    policy = (
+        CanaryPolicy.model_validate(json.loads(candidate.read_text(encoding="utf-8")))
+        if candidate.exists()
+        else CanaryPolicy()
+    )
+    if not _env_enabled("SPORTAGE_CANARY_MODE"):
+        return policy.model_copy(update={"enabled": False})
+    return policy
 
 
 def _day_start(now: datetime | None = None) -> str:
@@ -140,9 +149,8 @@ class CanaryGuard:
         for row in rows:
             try:
                 daily_capital += sum(_plan_liabilities(json.loads(row["plan_json"])), Decimal("0"))
-            except Exception:
-                # Fail closed if an existing live plan cannot be audited.
-                raise CanaryRiskError("Cannot audit an existing live plan for daily canary capital")
+            except Exception as exc:
+                raise CanaryRiskError("Cannot audit an existing live plan for daily canary capital") from exc
         if daily_capital + execution_capital > self.policy.max_daily_prepared_capital:
             raise CanaryRiskError(
                 f"Canary daily prepared capital would exceed €{self.policy.max_daily_prepared_capital:.2f}"
