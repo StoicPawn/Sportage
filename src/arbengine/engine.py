@@ -121,6 +121,10 @@ def _evaluate_combination(
                 estimated_placement_cost=_qcent(placement_cost),
                 estimated_win_commission=_qcent(win_commission),
                 deep_link=quote.deep_link,
+                source_market_id=quote.source_market_id,
+                source_selection_id=quote.source_selection_id,
+                source_market_version=quote.source_market_version,
+                available_size=quote.available_size,
             )
         )
 
@@ -181,12 +185,7 @@ def find_arbitrage(
     liquidity_book: LiquidityBook | None = None,
     min_roi: Decimal | None = None,
 ) -> list[ArbitrageOpportunity]:
-    """Find cross-bookmaker surebets using *net* return after configured costs.
-
-    The scanner is strict about market completeness. A group is considered only
-    when the number of distinct outcomes equals the provider-declared
-    `expected_outcomes`, preventing false positives from incomplete 1X2 markets.
-    """
+    """Find cross-bookmaker surebets using net return after configured costs."""
     now = now or datetime.now(timezone.utc)
     if min_net_roi is None:
         min_net_roi = min_roi if min_roi is not None else Decimal("0")
