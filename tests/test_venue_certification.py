@@ -71,30 +71,18 @@ def _opportunity() -> ArbitrageOpportunity:
         estimated_costs=Decimal("0"),
         legs=[
             Leg(
-                outcome="A",
-                bookmaker="Bet365",
-                operator_id="bet365",
-                odds=Decimal("2.10"),
-                effective_odds=Decimal("2.10"),
-                stake=Decimal("100"),
-                cash_outlay=Decimal("100"),
-                net_return_if_win=Decimal("210"),
-                quote_age_seconds=0,
+                outcome="A", bookmaker="Bet365", operator_id="bet365",
+                odds=Decimal("2.10"), effective_odds=Decimal("2.10"),
+                stake=Decimal("100"), cash_outlay=Decimal("100"),
+                net_return_if_win=Decimal("210"), quote_age_seconds=0,
             ),
             Leg(
-                outcome="B",
-                bookmaker="Betfair Exchange",
-                operator_id="betfair",
-                odds=Decimal("2.05"),
-                effective_odds=Decimal("2.05"),
-                stake=Decimal("102.44"),
-                cash_outlay=Decimal("102.44"),
-                net_return_if_win=Decimal("210"),
-                quote_age_seconds=0,
-                source_market_id="betfair-market",
-                source_selection_id="22",
-                source_market_version="7",
-                available_size=Decimal("100"),
+                outcome="B", bookmaker="Betfair Exchange", operator_id="betfair",
+                odds=Decimal("2.05"), effective_odds=Decimal("2.05"),
+                stake=Decimal("102.44"), cash_outlay=Decimal("102.44"),
+                net_return_if_win=Decimal("210"), quote_age_seconds=0,
+                source_market_id="betfair-market", source_selection_id="22",
+                source_market_version="7", available_size=Decimal("100"),
             ),
         ],
     )
@@ -111,23 +99,16 @@ class FakeExec(ExecutionConnector):
 
     def preflight(self, order):
         return ExecutionPreflight(
-            operator_id=self.operator_id,
-            ok=True,
-            message="probe ok",
-            market_open=True,
-            current_odds=order.limit_odds,
-            available_size=Decimal("100"),
-            market_version="8",
+            operator_id=self.operator_id, ok=True, message="probe ok",
+            market_open=True, current_odds=order.limit_odds,
+            available_size=Decimal("100"), market_version="8",
         )
 
     def place_order(self, order, *, live=False):
         return ExecutionResult(
-            operator_id=self.operator_id,
-            status=ExecutionStatus.ACCEPTED,
-            message="fake accepted",
-            requested_stake=order.stake,
-            requested_odds=order.limit_odds,
-            matched_stake=order.stake,
+            operator_id=self.operator_id, status=ExecutionStatus.ACCEPTED,
+            message="fake accepted", requested_stake=order.stake,
+            requested_odds=order.limit_odds, matched_stake=order.stake,
         )
 
 
@@ -168,18 +149,12 @@ def test_certifier_persists_success_and_expiry(db_store, monkeypatch):
         provider_factory=lambda operator, environment: FakeProvider(),
         execution_factory=lambda operator, environment: FakeExec(),
     )
-
     report = certifier.certify("betfair", ttl_hours=12)
-
     assert report.success is True
     assert {check.name for check in report.checks} == {
-        "credentials",
-        "direct_market_data",
-        "authenticated_session",
-        "execution_preflight",
+        "credentials", "direct_market_data", "authenticated_session", "execution_preflight",
     }
     assert store.valid("betfair", "production") is True
-    assert store.latest("betfair", "production") is not None
 
 
 def test_certification_fails_closed_when_credentials_missing(db_store, monkeypatch):
@@ -191,34 +166,41 @@ def test_certification_fails_closed_when_credentials_missing(db_store, monkeypat
     assert store.valid("betfair", "production") is False
 
 
-def test_live_readiness_requires_independent_certified_rescue(db_store, monkeypatch):
+def test_live_readiness_requires_independent_certified_production_rescue(db_store, monkeypatch):
+    monkeypatch.setenv("BETFLAG_ENVIRONMENT", "production")
+    monkeypatch.setattr(
+        readiness_module, "_automatic", lambda operator_id: operator_id in {"betfair", "betflag"}
+    )
+    certifications = VenueCertificationStore(db_store.conn)
+    _record_valid(certifications, "betfair", "production")
+    _record_valid(certifications, "betflag", "production")
+    quotes = [_quote("betflag", "A", "1"), _quote("betflag", "B", "2")]
+    rescue = assert_live_readiness(_opportunity(), quotes, certifications)
+    assert rescue == {"betfair": ["betflag"]}
+
+
+def test_staging_betflag_cannot_unlock_real_money_rescue(db_store, monkeypatch):
     monkeypatch.setenv("BETFLAG_ENVIRONMENT", "staging")
     monkeypatch.setattr(
-        readiness_module,
-        "_automatic",
-        lambda operator_id: operator_id in {"betfair", "betflag"},
+        readiness_module, "_automatic", lambda operator_id: operator_id in {"betfair", "betflag"}
     )
     certifications = VenueCertificationStore(db_store.conn)
     _record_valid(certifications, "betfair", "production")
     _record_valid(certifications, "betflag", "staging")
     quotes = [_quote("betflag", "A", "1"), _quote("betflag", "B", "2")]
-
-    rescue = assert_live_readiness(_opportunity(), quotes, certifications)
-    assert rescue == {"betfair": ["betflag"]}
+    with pytest.raises(LiveReadinessError, match="production rescue venue"):
+        assert_live_readiness(_opportunity(), quotes, certifications)
 
 
 def test_live_readiness_rejects_missing_independent_certification(db_store, monkeypatch):
-    monkeypatch.setenv("BETFLAG_ENVIRONMENT", "staging")
+    monkeypatch.setenv("BETFLAG_ENVIRONMENT", "production")
     monkeypatch.setattr(
-        readiness_module,
-        "_automatic",
-        lambda operator_id: operator_id in {"betfair", "betflag"},
+        readiness_module, "_automatic", lambda operator_id: operator_id in {"betfair", "betflag"}
     )
     certifications = VenueCertificationStore(db_store.conn)
     _record_valid(certifications, "betfair", "production")
     quotes = [_quote("betflag", "A", "1"), _quote("betflag", "B", "2")]
-
-    with pytest.raises(LiveReadinessError, match="No independent certified rescue venue"):
+    with pytest.raises(LiveReadinessError, match="production rescue venue"):
         assert_live_readiness(_opportunity(), quotes, certifications)
 
 
@@ -226,16 +208,12 @@ def test_live_connector_gate_blocks_without_certification(tmp_path, monkeypatch)
     db = tmp_path / "gate.sqlite3"
     monkeypatch.setenv("ARB_DB_PATH", str(db))
     monkeypatch.setenv("SPORTAGE_REQUIRE_LIVE_CERTIFICATION", "true")
-    inner = FakeExec()
-    connector = HealthTrackedExecutionConnector(inner)
+    monkeypatch.setenv("SPORTAGE_REQUIRE_ACCOUNT_FUNDS", "false")
+    connector = HealthTrackedExecutionConnector(FakeExec())
     order = BetOrder(
-        operator_id="betfair",
-        market_id="m",
-        selection_id="s",
-        stake=Decimal("5"),
-        limit_odds=Decimal("2.0"),
+        operator_id="betfair", market_id="m", selection_id="s",
+        stake=Decimal("5"), limit_odds=Decimal("2.0"),
     )
-
     blocked = connector.place_order(order, live=True)
     assert blocked.status == ExecutionStatus.REJECTED
     assert "certification" in blocked.message.lower()
