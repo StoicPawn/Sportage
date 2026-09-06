@@ -25,6 +25,7 @@ def run_shadow_loop(
     interval_seconds: float = 30.0,
     iterations: int | None = None,
     near_arb_gap: Decimal = Decimal("0.02"),
+    max_quote_age_seconds: float = 30.0,
 ) -> None:
     store = SQLiteStore(db_path)
     health_store = ProviderHealthStore(store.conn)
@@ -73,13 +74,19 @@ def run_shadow_loop(
                     quotes,
                     bankroll=bankroll,
                     min_net_roi=min_net_roi,
+                    max_quote_age_seconds=max_quote_age_seconds,
                     cost_book=cost_book,
                     liquidity_book=liquidity_book,
                 )
                 session.save_opportunities(opportunities)
 
+                fresh_signal_quotes = [
+                    quote
+                    for quote in quotes
+                    if -5.0 <= (session.started_at - quote.observed_at).total_seconds() <= max_quote_age_seconds
+                ]
                 signals = build_market_signals(
-                    quotes,
+                    fresh_signal_quotes,
                     opportunities,
                     observed_at=session.started_at,
                     near_gap=near_arb_gap,
