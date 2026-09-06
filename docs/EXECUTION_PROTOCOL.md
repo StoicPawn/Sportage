@@ -7,12 +7,14 @@ Sportage cannot create a true distributed transaction across independent bookmak
 1. Never submit a new live order when the global execution halt is active.
 2. One event+market can have only one active execution lock.
 3. A timeout is `UNKNOWN`, never automatically `REJECTED`.
-4. An `UNKNOWN` placement is reconciled by persistent order reference before any retry.
+4. An `UNKNOWN` placement is reconciled before any retry; if it cannot be resolved, execution halts.
 5. Exchange hedges and rescue orders use strict price limits and full-size FILL_OR_KILL where supported.
-6. A rescue is allowed only inside configured maximum loss and slippage limits.
-7. Unresolved exposure triggers `EMERGENCY` and a global halt.
-8. Emergency locks survive process restarts and require explicit manual reconciliation.
-9. Manual-only retail connectors never pretend to have placed a bet.
+6. BetFlag has no documented native FILL_OR_KILL; Sportage cancels the unmatched remainder immediately and treats any partial fill as exposure requiring rescue.
+7. A failed automatic venue is circuit-broken before rescue routing, so it cannot immediately rescue its own failed hedge.
+8. A rescue is allowed only inside configured maximum loss and slippage limits.
+9. Unresolved exposure triggers `EMERGENCY` and a global halt.
+10. Emergency locks survive process restarts and require explicit manual reconciliation.
+11. Manual-only retail connectors never pretend to have placed a bet.
 
 ## Normal retail + exchange path
 
@@ -29,8 +31,8 @@ WAITING_MANUAL
 
 EXECUTING
   -> exchange preflight refresh
-  -> verify market OPEN, price, depth and marketVersion
-  -> place FILL_OR_KILL hedge with customerRef + customerOrderRef
+  -> verify market, price, depth and native market version
+  -> submit strict automatic hedge
 
 FULLY_HEDGED
   -> both legs confirmed matched
@@ -40,28 +42,51 @@ FULLY_HEDGED
 ## Unknown order path
 
 ```text
-placeOrders raises timeout/network error
-  -> DO NOT RESUBMIT
-  -> listCurrentOrders(customerOrderRef)
+placement raises timeout/network error
+  -> DO NOT RESUBMIT BLINDLY
+  -> reconcile with the official operator order API where possible
   -> known matched/rejected state: continue from actual state
   -> still UNKNOWN: EMERGENCY + GLOBAL HALT
 ```
 
-The persistent `customerOrderRef` is separate from Betfair's request-level `customerRef`. The first identifies the order for reconciliation; the second protects short-window duplicate submissions.
+Betfair has `customerOrderRef`, which gives strong direct reconciliation. BetFlag's public API does not document an equivalent client idempotency key; if Sportage cannot uniquely reconcile a BetFlag placement after a transport failure, it deliberately remains `UNKNOWN` and halts rather than risk a duplicate bet.
 
-## Orphan / rescue path
+## Orphan / independent rescue path
 
 When one leg is matched and the intended hedge is rejected, cancelled, partially matched, or otherwise not fully filled:
 
-1. Cancel any known unmatched remainder.
-2. Recompute actual exposure from matched stake and average matched price.
-3. Read fresh quotes only.
-4. Find an automatic rescue venue with provider-native market and selection IDs.
-5. Reject candidates outside `max_rescue_slippage_bps` or available depth.
-6. Calculate the rescue stake required to equalize returns against the already matched exposure.
-7. Reject the rescue if projected loss exceeds `max_rescue_loss`.
-8. Submit rescue as full-size FILL_OR_KILL.
-9. If rescue is fully matched, mark `RESCUED`; otherwise enter `EMERGENCY` and halt all new executions.
+1. Mark the failed automatic venue unhealthy for `SPORTAGE_EXECUTION_VENUE_COOLDOWN_SECONDS` (default 60s).
+2. Cancel any known unmatched remainder.
+3. Recompute actual exposure from matched stake and average matched price.
+4. Read fresh quotes only.
+5. Exclude the venue that just failed from automatic rescue candidates while its circuit is open.
+6. Find another automatic venue with provider-native market and selection IDs.
+7. Reject candidates outside `max_rescue_slippage_bps` or available depth.
+8. Calculate the rescue stake required to equalize returns against the already matched exposure.
+9. Reject the rescue if projected loss exceeds `max_rescue_loss`.
+10. Submit the rescue with the strictest immediate-fill behavior supported by that API.
+11. If rescue is fully matched, mark `RESCUED`; otherwise enter `EMERGENCY` and halt all new executions.
+
+With the current Italy profile this gives a genuine independent path:
+
+```text
+retail primary
+     |
+     v
+Betfair hedge ---- failure ----> Betfair circuit OPEN
+                                  |
+                                  v
+                           BetFlag rescue
+
+and symmetrically:
+
+BetFlag hedge ---- failure ----> BetFlag circuit OPEN
+                                  |
+                                  v
+                           Betfair rescue
+```
+
+The circuit breaker is intentionally in-memory and short-lived. Durable unresolved risk is handled separately by the execution database and global halt, which survive process restarts.
 
 ## Configuration
 
@@ -77,6 +102,13 @@ When one leg is matched and the intended hedge is rejected, cancelled, partially
   "require_full_fill_exchange": true,
   "max_reconcile_attempts": 2
 }
+```
+
+Environment:
+
+```text
+SPORTAGE_EXECUTION_VENUE_COOLDOWN_SECONDS=60
+SPORTAGE_LIVE_EXECUTION=false
 ```
 
 These are safety limits, not profitability assumptions. They should be calibrated from real shadow/execution telemetry.
@@ -128,9 +160,14 @@ sportage-exec resolve-emergency \
   --clear-global-halt
 ```
 
-## Current automatic venue
+## Current automatic venues
 
-Betfair Exchange is the current official automatic execution connector. Retail Tier 1/2 connectors remain `MANUAL_REQUIRED` unless an official supported placement API is configured. The architecture can add future automatic connectors without changing the coordinator state machine.
+The Italy profile now has two verified official automatic execution connectors:
+
+- **Betfair Exchange API-NG** — native FILL_OR_KILL, market version, client order references and reconciliation.
+- **BetFlag Exchange API 2.0.7** — official market data, login/session, placement, cancellation and user-order reconciliation; immediate cancellation is used for any unmatched remainder because native FILL_OR_KILL is not publicly documented.
+
+All other current Tier 1/2 retail connectors remain `MANUAL_REQUIRED` unless a verified official transactional API is configured.
 
 ## Remaining unavoidable risk
 
