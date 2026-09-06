@@ -9,6 +9,12 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .account_funds import (
+    AccountSnapshotStore,
+    LiveFundingError,
+    assert_live_funding,
+    refresh_account_snapshot,
+)
 from .costs import load_cost_config
 from .execution_coordinator import ExecutionCoordinator, ExecutionPlan, ExecutionPolicy, RunStatus
 from .execution_storage import ExecutionStore
@@ -23,7 +29,6 @@ console = Console()
 
 
 def _bind_db(db: Path) -> None:
-    """Keep connector-level live gates on the exact DB selected by this CLI command."""
     os.environ["ARB_DB_PATH"] = str(db)
 
 
@@ -115,6 +120,42 @@ def venue_status(
         store.close()
 
 
+@app.command("account-status")
+def account_status(
+    operator: str = typer.Option("all", help="betfair, betflag, or all"),
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
+) -> None:
+    _bind_db(db)
+    operators = ["betfair", "betflag"] if operator.lower() == "all" else [operator.lower()]
+    if any(item not in {"betfair", "betflag"} for item in operators):
+        raise typer.BadParameter("Only betfair, betflag, or all support direct account funds")
+    store = SQLiteStore(db)
+    failures = 0
+    try:
+        snapshots = AccountSnapshotStore(store.conn)
+        table = Table("Operator", "Env", "Available", "Total", "Locked", "Exposure", "Observed")
+        for item in operators:
+            try:
+                snapshot = refresh_account_snapshot(item, snapshots)
+                table.add_row(
+                    snapshot.operator_id,
+                    snapshot.environment,
+                    f"€{snapshot.available_balance:.2f}",
+                    "" if snapshot.total_balance is None else f"€{snapshot.total_balance:.2f}",
+                    "" if snapshot.locked_balance is None else f"€{snapshot.locked_balance:.2f}",
+                    "" if snapshot.exposure is None else f"€{snapshot.exposure:.2f}",
+                    snapshot.observed_at.isoformat(),
+                )
+            except Exception as exc:
+                failures += 1
+                table.add_row(item, "?", "ERROR", "", "", type(exc).__name__, str(exc)[:80])
+        console.print(table)
+    finally:
+        store.close()
+    if failures:
+        raise typer.Exit(code=2)
+
+
 @app.command("prepare")
 def prepare(
     scan_id: int = typer.Option(..., min=1),
@@ -136,6 +177,7 @@ def prepare(
         opportunity = ArbitrageOpportunity.model_validate(json.loads(rows[opportunity_index]["payload"]))
         quotes = store.load_quotes_for_scan(scan_id)
         execution_policy = _policy(policy)
+        cost_book = load_cost_config(_cost_path(costs))
 
         if live:
             certifications = VenueCertificationStore(store.conn)
@@ -146,15 +188,34 @@ def prepare(
                     certifications,
                     max_quote_age_seconds=execution_policy.max_quote_age_seconds,
                 )
-            except LiveReadinessError as exc:
+                funding = assert_live_funding(
+                    opportunity,
+                    quotes,
+                    rescue_map,
+                    cost_book=cost_book,
+                    max_quote_age_seconds=execution_policy.max_quote_age_seconds,
+                    max_rescue_slippage_bps=execution_policy.max_rescue_slippage_bps,
+                    snapshot_store=AccountSnapshotStore(store.conn),
+                )
+            except (LiveReadinessError, LiveFundingError) as exc:
                 raise typer.BadParameter(f"Live readiness failed: {exc}") from exc
-            console.print("[bold]Certified independent rescue map[/bold]")
-            for failed_operator, alternatives in rescue_map.items():
-                console.print(f"  {failed_operator} -> {', '.join(alternatives)}")
 
-        coordinator = ExecutionCoordinator(
-            store, policy=execution_policy, cost_book=load_cost_config(_cost_path(costs))
-        )
+            console.print("[bold]Certified/funded independent rescue map[/bold]")
+            for failed_operator, selected in funding.rescue_routes.items():
+                console.print(f"  {failed_operator} -> {selected}")
+            funds_table = Table("Venue", "Env", "Free", "Planned", "Rescue reserve", "Free after planned")
+            for venue in funding.venues:
+                funds_table.add_row(
+                    venue.operator_id,
+                    venue.environment,
+                    f"€{venue.available_balance:.2f}",
+                    f"€{venue.planned_requirement:.2f}",
+                    f"€{venue.rescue_requirement:.2f}",
+                    f"€{venue.free_after_planned:.2f}",
+                )
+            console.print(funds_table)
+
+        coordinator = ExecutionCoordinator(store, policy=execution_policy, cost_book=cost_book)
         plan = coordinator.prepare(opportunity, quotes, live=live)
         run = coordinator.exec_store.get_run(plan.execution_id)
         status = run["status"] if run else "unknown"

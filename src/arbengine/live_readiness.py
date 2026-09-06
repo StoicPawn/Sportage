@@ -18,6 +18,13 @@ def _automatic(operator_id: str) -> bool:
     return bool(getattr(connector, "automatic_execution", False))
 
 
+def _live_environment_eligible(operator_id: str) -> bool:
+    environment = execution_environment(operator_id)
+    if operator_id == "betflag":
+        return environment == "production"
+    return environment == "production"
+
+
 def assert_live_readiness(
     opportunity: ArbitrageOpportunity,
     quotes: Iterable[Quote],
@@ -25,14 +32,14 @@ def assert_live_readiness(
     *,
     max_quote_age_seconds: float = 10.0,
 ) -> dict[str, list[str]]:
-    """Require certified primary automatic venues and an independent rescue venue.
+    """Require certified production venues and a distinct rescue route before live arming."""
 
-    For every automatic venue used by the opportunity, at least one *different*
-    certified automatic venue must currently expose fresh native execution references
-    for every outcome in the same event+market. This is intentionally conservative:
-    a live plan is armed only when Sportage can route around the failure of any one
-    automatic venue before exposure is opened.
-    """
+    required_outcomes = {leg.outcome for leg in opportunity.legs}
+    if len(required_outcomes) != 2:
+        raise LiveReadinessError(
+            "Live automatic execution currently supports only two-outcome markets; "
+            "3+ outcomes can require a non-atomic multi-leg rescue."
+        )
 
     planned_automatic = {
         leg.operator_id
@@ -44,13 +51,16 @@ def assert_live_readiness(
 
     for operator_id in sorted(planned_automatic):
         environment = execution_environment(operator_id)
+        if not _live_environment_eligible(operator_id):
+            raise LiveReadinessError(
+                f"Automatic venue {operator_id}/{environment} is test-only; live execution requires production."
+            )
         if not certifications.valid(operator_id, environment):
             raise LiveReadinessError(
                 f"Automatic venue {operator_id}/{environment} has no current successful certification."
             )
 
     now = datetime.now(timezone.utc)
-    required_outcomes = {leg.outcome for leg in opportunity.legs}
     coverage: dict[str, set[str]] = defaultdict(set)
 
     for quote in quotes:
@@ -65,7 +75,7 @@ def assert_live_readiness(
             continue
         if not quote.source_market_id or not quote.source_selection_id:
             continue
-        if not _automatic(quote.operator_id):
+        if not _automatic(quote.operator_id) or not _live_environment_eligible(quote.operator_id):
             continue
         environment = execution_environment(quote.operator_id)
         if not certifications.valid(quote.operator_id, environment):
@@ -81,7 +91,7 @@ def assert_live_readiness(
         )
         if not alternatives:
             raise LiveReadinessError(
-                f"No independent certified rescue venue can replace {failed_operator} "
+                f"No independent certified production rescue venue can replace {failed_operator} "
                 f"for all outcomes of {opportunity.event_market_key}."
             )
         rescue_map[failed_operator] = alternatives
