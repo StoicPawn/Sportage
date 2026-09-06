@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sportage-arbitrage"
-version = "0.5.0"
-description = "Net sports-arbitrage scanner with unified bookmaker connectors, provider health and execution-aware backtesting."
+version = "0.6.0"
+description = "Net sports-arbitrage scanner with adaptive provider scheduling, unified bookmaker connectors and execution-aware backtesting."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
