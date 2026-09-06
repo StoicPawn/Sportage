@@ -82,9 +82,9 @@ OPERATORS: dict[str, OperatorSpec] = {
     ),
     "betflag": OperatorSpec(
         "betflag", "BetFlag", 2, "16008", ("betflag.it",),
-        ("betflag", "bet flag", "betflag exchange"), MarketDataAccess.AGGREGATOR,
-        ExecutionAccess.MANUAL_ONLY,
-        "BetFlag offers an exchange product, but Sportage does not assume a public transactional API.",
+        ("betflag", "bet flag", "betflag exchange"),
+        MarketDataAccess.OFFICIAL_PUBLIC_API, ExecutionAccess.OFFICIAL_API,
+        "Official BetFlag Exchange API 2.0.7 supports book data, session login, placement, cancellation and order reconciliation.",
     ),
     "bwin": OperatorSpec(
         "bwin", "bwin", 2, "16013", ("bwin.it",),
@@ -113,7 +113,6 @@ def canonical_operator_id(value: str | None) -> str | None:
     key = canonical_name(value)
     if key in _ALIAS_TO_ID:
         return _ALIAS_TO_ID[key]
-    # Feed titles often append geography/exchange qualifiers.
     for alias, operator_id in _ALIAS_TO_ID.items():
         if len(alias) >= 4 and (key.startswith(alias + " ") or key.endswith(" " + alias)):
             return operator_id
