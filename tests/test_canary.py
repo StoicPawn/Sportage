@@ -50,6 +50,7 @@ def plan(*stakes: str) -> dict:
 def test_canary_rejects_oversized_plan(tmp_path):
     store = SQLiteStore(tmp_path / "canary.sqlite3")
     try:
+        ExecutionStore(store.conn)
         policy = CanaryPolicy(max_leg_stake=Decimal("5"), max_execution_capital=Decimal("12"))
         guard = CanaryGuard(store.conn, policy)
         with pytest.raises(CanaryRiskError, match="max leg stake"):
