@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 
 from arbengine.connectors.betfair import BetfairExchangeMarketDataConnector
+from arbengine.connectors.betflag import BetFlagExchangeMarketDataConnector
 from arbengine.models import MarketType, Quote
 from arbengine.normalizer import canonical_name
 from arbengine.operators import OPERATORS, canonical_operator_id
@@ -19,6 +20,7 @@ from arbengine.providers.the_odds_api import TheOddsAPIProvider
 
 _SOURCE_PRIORITY = {
     "betfair_api_ng": 100,
+    "betflag_exchange_api": 100,
     "the_odds_api": 50,
     "odds_api_io": 40,
 }
@@ -41,8 +43,6 @@ def _sport_family(value: str) -> str:
 
 def _canonical_event_id(quote: Quote) -> str:
     participants = sorted((canonical_name(quote.home), canonical_name(quote.away)))
-    # Five-minute buckets absorb small source timestamp differences while retaining
-    # the original source timestamp and source event id for audit/debugging.
     epoch_bucket = int(quote.commence_time.timestamp() // 300)
     raw = "|".join([_sport_family(quote.sport), *participants, str(epoch_bucket)])
     digest = hashlib.sha1(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
@@ -83,12 +83,7 @@ def _source_label(source: OddsProvider) -> str:
 
 
 class UnifiedOperatorProvider(OddsProvider):
-    """Merge multiple market-data sources into one canonical quote stream.
-
-    Upstreams are fetched concurrently and isolated from each other. A failed source
-    is recorded in the fetch report without discarding healthy-source data. Duplicate
-    operator/event/market/outcome quotes prefer direct/official data and then freshness.
-    """
+    """Merge multiple market-data sources into one canonical quote stream."""
 
     def __init__(self, sources: list[OddsProvider], max_workers: int | None = None) -> None:
         if not sources:
@@ -114,7 +109,7 @@ class UnifiedOperatorProvider(OddsProvider):
                 "error_type": None,
                 "error_message": None,
             }
-        except Exception as exc:  # source failure must not poison healthy sources
+        except Exception as exc:
             completed_at = datetime.now(timezone.utc)
             return [], {
                 "source": _source_label(source),
@@ -130,31 +125,25 @@ class UnifiedOperatorProvider(OddsProvider):
         fetched_at = datetime.now(timezone.utc)
         order = {id(source): idx for idx, source in enumerate(self.sources)}
         fetched: list[tuple[int, list[Quote], dict[str, object]]] = []
-
         with ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="sportage-feed") as pool:
             futures = {pool.submit(self._fetch_one, source): source for source in self.sources}
             for future in as_completed(futures):
                 source = futures[future]
                 raw, meta = future.result()
                 fetched.append((order[id(source)], raw, meta))
-
         fetched.sort(key=lambda item: item[0])
+
         normalized_by_source: list[tuple[list[Quote], dict[str, object]]] = []
         source_health: list[SourceHealth] = []
-
         for _, raw_quotes, meta in fetched:
             normalized = [quote for raw in raw_quotes if (quote := normalize_quote(raw)) is not None]
             operator_ids = {q.operator_id for q in normalized if q.operator_id}
             source_health.append(
                 SourceHealth(
-                    source=str(meta["source"]),
-                    status=str(meta["status"]),
-                    started_at=meta["started_at"],  # type: ignore[arg-type]
-                    completed_at=meta["completed_at"],  # type: ignore[arg-type]
-                    duration_ms=float(meta["duration_ms"]),
-                    raw_quote_count=len(raw_quotes),
-                    normalized_quote_count=len(normalized),
-                    operator_count=len(operator_ids),
+                    source=str(meta["source"]), status=str(meta["status"]),
+                    started_at=meta["started_at"], completed_at=meta["completed_at"],  # type: ignore[arg-type]
+                    duration_ms=float(meta["duration_ms"]), raw_quote_count=len(raw_quotes),
+                    normalized_quote_count=len(normalized), operator_count=len(operator_ids),
                     error_type=meta["error_type"] if isinstance(meta["error_type"], str) else None,
                     error_message=meta["error_message"] if isinstance(meta["error_message"], str) else None,
                 )
@@ -164,12 +153,7 @@ class UnifiedOperatorProvider(OddsProvider):
         best: dict[tuple[str, str, str, str], Quote] = {}
         for normalized, _ in normalized_by_source:
             for quote in normalized:
-                key = (
-                    quote.event_id,
-                    quote.market_signature,
-                    quote.operator_id or quote.bookmaker,
-                    quote.outcome,
-                )
+                key = (quote.event_id, quote.market_signature, quote.operator_id or quote.bookmaker, quote.outcome)
                 previous = best.get(key)
                 if previous is None:
                     best[key] = quote
@@ -183,33 +167,25 @@ class UnifiedOperatorProvider(OddsProvider):
             best.values(),
             key=lambda q: (q.commence_time, q.event_id, q.market_signature, q.operator_id or "", q.outcome),
         )
-
         by_operator: dict[str, list[Quote]] = defaultdict(list)
         for quote in quotes:
             if quote.operator_id:
                 by_operator[quote.operator_id].append(quote)
-
         coverage: list[OperatorCoverage] = []
         for operator_id, items in sorted(by_operator.items()):
             freshest = max((q.observed_at for q in items), default=None)
             oldest = min((q.observed_at for q in items), default=fetched_at)
             coverage.append(
                 OperatorCoverage(
-                    operator_id=operator_id,
-                    quote_count=len(items),
+                    operator_id=operator_id, quote_count=len(items),
                     event_count=len({q.event_id for q in items}),
                     market_count=len({(q.event_id, q.market_signature) for q in items}),
-                    source_count=len({q.source for q in items}),
-                    freshest_observed_at=freshest,
+                    source_count=len({q.source for q in items}), freshest_observed_at=freshest,
                     oldest_quote_age_seconds=max(0.0, (fetched_at - oldest).total_seconds()),
                 )
             )
-
         report = ProviderFetchReport(
-            quotes=quotes,
-            source_health=source_health,
-            operator_coverage=coverage,
-            fetched_at=fetched_at,
+            quotes=quotes, source_health=source_health, operator_coverage=coverage, fetched_at=fetched_at
         )
         self.last_report = report
         return report
@@ -233,9 +209,11 @@ def build_unified_provider() -> UnifiedOperatorProvider:
         sources.append(OddsApiIoProvider())
     if os.getenv("BETFAIR_APP_KEY") and os.getenv("BETFAIR_SESSION_TOKEN"):
         sources.append(BetfairExchangeMarketDataConnector())
+    if os.getenv("BETFLAG_API_KEY"):
+        sources.append(BetFlagExchangeMarketDataConnector())
     if not sources:
         raise ValueError(
             "No market-data source configured. Set THE_ODDS_API_KEY, ODDS_API_IO_KEY, "
-            "or BETFAIR_APP_KEY + BETFAIR_SESSION_TOKEN."
+            "BETFAIR_APP_KEY + BETFAIR_SESSION_TOKEN, or BETFLAG_API_KEY."
         )
     return UnifiedOperatorProvider(sources)
