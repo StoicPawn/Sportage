@@ -91,24 +91,32 @@ class ProviderHealthStore:
         )
         self.conn.commit()
 
-    def latest_source_health(self) -> list[sqlite3.Row]:
+    def latest_scan_id(self) -> int | None:
         row = self.conn.execute("SELECT MAX(scan_id) AS scan_id FROM source_health").fetchone()
         if row is None or row["scan_id"] is None:
-            return []
+            return None
+        return int(row["scan_id"])
+
+    def source_health_for_scan(self, scan_id: int) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
                 "SELECT * FROM source_health WHERE scan_id=? ORDER BY source",
-                (int(row["scan_id"]),),
+                (scan_id,),
             )
         )
 
-    def latest_operator_coverage(self) -> list[sqlite3.Row]:
-        row = self.conn.execute("SELECT MAX(scan_id) AS scan_id FROM operator_coverage").fetchone()
-        if row is None or row["scan_id"] is None:
-            return []
+    def operator_coverage_for_scan(self, scan_id: int) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
                 "SELECT * FROM operator_coverage WHERE scan_id=? ORDER BY operator_id",
-                (int(row["scan_id"]),),
+                (scan_id,),
             )
         )
+
+    def latest_source_health(self) -> list[sqlite3.Row]:
+        scan_id = self.latest_scan_id()
+        return [] if scan_id is None else self.source_health_for_scan(scan_id)
+
+    def latest_operator_coverage(self) -> list[sqlite3.Row]:
+        scan_id = self.latest_scan_id()
+        return [] if scan_id is None else self.operator_coverage_for_scan(scan_id)
