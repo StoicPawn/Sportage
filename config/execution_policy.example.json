@@ -1,0 +1,9 @@
+{
+  "min_net_roi": "0.015",
+  "max_quote_age_seconds": 10,
+  "max_rescue_loss": "5.00",
+  "max_rescue_slippage_bps": "100",
+  "require_rescue_venue": true,
+  "require_full_fill_exchange": true,
+  "max_reconcile_attempts": 2
+}
