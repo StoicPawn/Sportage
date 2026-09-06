@@ -11,10 +11,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .backtest import BacktestConfig, run_backtest
+from .backtest import BacktestConfig
 from .connectors.execution import build_execution_connector
 from .connectors.base import BetOrder
 from .costs import load_cost_config
+from .coverage_backtest import run_coverage_aware_backtest
 from .engine import find_arbitrage
 from .liquidity import load_liquidity_config
 from .models import SettlementResult
@@ -270,6 +271,12 @@ def backtest_command(
     settlement_mode: str = typer.Option("guaranteed", help="guaranteed or results"),
     min_persistence_seconds: float = typer.Option(0.0, min=0.0),
     execution_latency_seconds: float = typer.Option(0.0, min=0.0),
+    min_covered_operators: int = typer.Option(
+        0,
+        min=0,
+        max=14,
+        help="Reject scans with fewer covered Tier 1/2 operators; 0 preserves legacy behavior",
+    ),
 ) -> None:
     if settlement_mode not in {"guaranteed", "results"}:
         raise typer.BadParameter("settlement-mode must be 'guaranteed' or 'results'")
@@ -283,7 +290,7 @@ def backtest_command(
     start = end - timedelta(days=days)
     store = SQLiteStore(db)
     try:
-        result = run_backtest(
+        result, coverage_stats = run_coverage_aware_backtest(
             store,
             BacktestConfig(
                 initial_bankroll=Decimal(str(initial_bankroll)),
@@ -297,6 +304,7 @@ def backtest_command(
                 start=start,
                 end=end,
             ),
+            min_covered_operators=min_covered_operators,
             cost_book=load_cost_config(costs),
             liquidity_book=load_liquidity_config(liquidity),
         )
@@ -307,11 +315,17 @@ def backtest_command(
         f"Scans={result.scans} Trades={len(result.trades)} Signals={result.signals_seen} | "
         f"Projected net={result.projected_profit:.2f} ({result.projected_return_pct:.2%}) | "
         f"Realized={result.realized_profit:.2f} | "
+        f"Coverage rejects={coverage_stats.rejected_scans} | "
         f"Persistence rejects={result.signals_rejected_for_persistence} | "
         f"Latency rejects={result.signals_rejected_for_latency} | "
         f"Liquidity rejects={result.signals_rejected_for_liquidity} | "
         f"Missing-result rejects={result.signals_rejected_for_missing_result}"
     )
+    if min_covered_operators > 0:
+        console.print(
+            f"Coverage filter: {coverage_stats.eligible_scans}/{coverage_stats.total_scans} scans "
+            f"had >= {min_covered_operators} covered operators."
+        )
     if result.ending_balance_by_bookmaker:
         balances = Table("Bookmaker", "Start", "End", "Delta")
         names = sorted(
