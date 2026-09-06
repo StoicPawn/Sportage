@@ -7,6 +7,7 @@ from pathlib import Path
 from .costs import CostBook
 from .engine import find_arbitrage
 from .liquidity import LiquidityBook
+from .market_signals import MarketSignalStore, build_market_signals
 from .operators import OPERATORS
 from .provider_health_storage import ProviderHealthStore
 from .providers.base import OddsProvider
@@ -23,9 +24,12 @@ def run_shadow_loop(
     liquidity_book: LiquidityBook | None = None,
     interval_seconds: float = 30.0,
     iterations: int | None = None,
+    near_arb_gap: Decimal = Decimal("0.02"),
+    max_quote_age_seconds: float = 30.0,
 ) -> None:
     store = SQLiteStore(db_path)
     health_store = ProviderHealthStore(store.conn)
+    signal_store = MarketSignalStore(store.conn)
     history = ScanHistory(store)
     completed = 0
     provider_name = provider.__class__.__name__
@@ -38,6 +42,7 @@ def run_shadow_loop(
         while iterations is None or completed < iterations:
             session = history.start(provider_name)
             opportunities = []
+            signal_counts: dict[str, int] = {}
             coverage_text = ""
             try:
                 fetch_report = getattr(provider, "fetch_report", None)
@@ -69,10 +74,27 @@ def run_shadow_loop(
                     quotes,
                     bankroll=bankroll,
                     min_net_roi=min_net_roi,
+                    max_quote_age_seconds=max_quote_age_seconds,
                     cost_book=cost_book,
                     liquidity_book=liquidity_book,
                 )
                 session.save_opportunities(opportunities)
+
+                fresh_signal_quotes = [
+                    quote
+                    for quote in quotes
+                    if -5.0 <= (session.started_at - quote.observed_at).total_seconds() <= max_quote_age_seconds
+                ]
+                signals = build_market_signals(
+                    fresh_signal_quotes,
+                    opportunities,
+                    observed_at=session.started_at,
+                    near_gap=near_arb_gap,
+                )
+                signal_store.save(session.scan_id, signals)
+                for signal in signals:
+                    signal_counts[signal.status] = signal_counts.get(signal.status, 0) + 1
+
                 receipt = session.complete()
             except Exception as exc:
                 receipt = session.fail(exc)
@@ -83,12 +105,17 @@ def run_shadow_loop(
                 )
                 raise
 
+            signal_text = (
+                f" | signals=net:{signal_counts.get('net_arbitrage', 0)}"
+                f" gross:{signal_counts.get('gross_arbitrage', 0)}"
+                f" near:{signal_counts.get('near_arbitrage', 0)}"
+            )
             if opportunities:
                 best = opportunities[0]
                 print(
                     f"[ARB] scan={receipt.scan_id} {best.event} | NET ROI {best.net_roi:.4%} | "
                     f"gross {best.gross_roi:.4%} | net profit {best.guaranteed_profit} "
-                    f"on {best.capital_used}{coverage_text}"
+                    f"on {best.capital_used}{coverage_text}{signal_text}"
                     + (
                         f" | liquidity-limited: {', '.join(best.limiting_bookmakers)}"
                         if best.liquidity_limited
@@ -99,7 +126,7 @@ def run_shadow_loop(
                 print(
                     f"[SCAN] id={receipt.scan_id} {receipt.quote_count} quotes | "
                     f"no net opportunity >= {min_net_roi:.2%} | "
-                    f"{receipt.duration_ms:.0f} ms{coverage_text}"
+                    f"{receipt.duration_ms:.0f} ms{coverage_text}{signal_text}"
                 )
 
             completed += 1
