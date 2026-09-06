@@ -61,10 +61,6 @@ class CodereExecutionConnector(ManualRetailExecutionConnector):
     operator_id = "codere"
 
 
-class BetFlagExecutionConnector(ManualRetailExecutionConnector):
-    operator_id = "betflag"
-
-
 class BwinExecutionConnector(ManualRetailExecutionConnector):
     operator_id = "bwin"
 

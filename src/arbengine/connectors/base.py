@@ -110,6 +110,8 @@ class ExecutionConnector(ABC):
         *,
         bet_id: str | None = None,
         customer_order_ref: str | None = None,
+        market_id: str | None = None,
+        order: BetOrder | None = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             operator_id=self.operator_id,

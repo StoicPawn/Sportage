@@ -4,9 +4,9 @@ from arbengine.operators import operator_spec
 
 from .base import ExecutionConnector
 from .betfair import BetfairExchangeExecutionConnector
+from .betflag import BetFlagExchangeExecutionConnector
 from .manual_retail import (
     Bet365ExecutionConnector,
-    BetFlagExecutionConnector,
     BetssonExecutionConnector,
     BwinExecutionConnector,
     CodereExecutionConnector,
@@ -20,8 +20,9 @@ from .manual_retail import (
     WinamaxExecutionConnector,
 )
 
-# Only official, configured APIs may advertise automatic execution.
+# Only verified official APIs may advertise automatic execution.
 BetfairExchangeExecutionConnector.automatic_execution = True
+BetFlagExchangeExecutionConnector.automatic_execution = True
 
 _EXECUTION_CONNECTORS: dict[str, type[ExecutionConnector]] = {
     "bet365": Bet365ExecutionConnector,
@@ -34,7 +35,7 @@ _EXECUTION_CONNECTORS: dict[str, type[ExecutionConnector]] = {
     "planetwin365": Planetwin365ExecutionConnector,
     "betsson": BetssonExecutionConnector,
     "codere": CodereExecutionConnector,
-    "betflag": BetFlagExecutionConnector,
+    "betflag": BetFlagExchangeExecutionConnector,
     "bwin": BwinExecutionConnector,
     "william_hill": WilliamHillExecutionConnector,
     "winamax": WinamaxExecutionConnector,

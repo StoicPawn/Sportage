@@ -13,6 +13,7 @@ from time import perf_counter
 from pydantic import BaseModel, Field
 
 from arbengine.connectors.betfair import BetfairExchangeMarketDataConnector
+from arbengine.connectors.betflag import BetFlagExchangeMarketDataConnector
 from arbengine.models import Quote
 from arbengine.providers.base import OddsProvider
 from arbengine.providers.health import OperatorCoverage, ProviderFetchReport, SourceHealth
@@ -24,6 +25,7 @@ from arbengine.scheduler_storage import SchedulerBudgetStore
 
 _SOURCE_PRIORITY = {
     "betfair_api_ng": 100,
+    "betflag_exchange_api": 100,
     "the_odds_api": 50,
     "odds_api_io": 40,
 }
@@ -141,13 +143,7 @@ def _best_implied_gap(quotes: list[Quote]) -> float | None:
 
 
 class AdaptiveScheduledProvider(OddsProvider):
-    """Budget-aware provider hub with source-specific adaptive polling.
-
-    The outer shadow loop may tick frequently; each upstream is called only when its
-    own schedule says it is due and its configured call/credit budget permits it.
-    Cached quotes retain their original observed_at timestamp, so the arbitrage
-    engine can still reject stale data independently of scheduler cache retention.
-    """
+    """Budget-aware provider hub with source-specific adaptive polling."""
 
     def __init__(
         self,
@@ -259,20 +255,14 @@ class AdaptiveScheduledProvider(OddsProvider):
             if not allowed:
                 blocked_until = self.budget_store.blocked_until(reason or "budget", now)
                 self.budget_store.record(
-                    item.source,
-                    now=now,
-                    units=0,
-                    next_due_at=blocked_until,
-                    status="budget_exhausted",
-                    reason=reason,
-                    count_call=False,
+                    item.source, now=now, units=0, next_due_at=blocked_until,
+                    status="budget_exhausted", reason=reason, count_call=False,
                 )
                 health[item.source] = SourceHealth(
                     item.source, "budget_exhausted", now, now, 0.0,
                     normalized_quote_count=len(cached),
                     operator_count=len({q.operator_id for q in cached if q.operator_id}),
-                    error_type="BudgetExhausted",
-                    error_message=reason,
+                    error_type="BudgetExhausted", error_message=reason,
                 )
                 continue
             due.append(item)
@@ -286,7 +276,6 @@ class AdaptiveScheduledProvider(OddsProvider):
                     item = futures[future]
                     fetched[item.source] = future.result()
 
-        # Update cache first, then choose the next cadence from the newest combined state.
         for item in due:
             quotes, _, exc = fetched[item.source]
             if exc is None:
@@ -299,21 +288,14 @@ class AdaptiveScheduledProvider(OddsProvider):
             interval = item.policy.error_retry_seconds if exc is not None else self._interval(item.policy, after.mode)
             next_due = now + timedelta(seconds=interval)
             self.budget_store.record(
-                item.source,
-                now=now,
-                units=item.policy.units_per_call,
-                next_due_at=next_due,
-                status="error" if exc is not None else "ok",
-                reason=None if exc is None else type(exc).__name__,
-                count_call=True,
+                item.source, now=now, units=item.policy.units_per_call,
+                next_due_at=next_due, status="error" if exc is not None else "ok",
+                reason=None if exc is None else type(exc).__name__, count_call=True,
             )
             cached = self._fresh_cache(item, now)
             health[item.source] = SourceHealth(
-                source=item.source,
-                status="error" if exc is not None else "ok",
-                started_at=now,
-                completed_at=datetime.now(timezone.utc),
-                duration_ms=duration_ms,
+                source=item.source, status="error" if exc is not None else "ok",
+                started_at=now, completed_at=datetime.now(timezone.utc), duration_ms=duration_ms,
                 raw_quote_count=len(quotes) if exc is None else 0,
                 normalized_quote_count=len(cached),
                 operator_count=len({q.operator_id for q in cached if q.operator_id}),
@@ -356,6 +338,11 @@ def build_adaptive_provider(
                 provider = BetfairExchangeMarketDataConnector()
             else:
                 reason = "BETFAIR_APP_KEY and BETFAIR_SESSION_TOKEN are required"
+        elif source == "betflag":
+            if os.getenv("BETFLAG_API_KEY"):
+                provider = BetFlagExchangeMarketDataConnector()
+            else:
+                reason = "BETFLAG_API_KEY plus its configured parameter name are required"
         elif source == "odds_api_io":
             if os.getenv("ODDS_API_IO_KEY"):
                 provider = OddsApiIoProvider()
