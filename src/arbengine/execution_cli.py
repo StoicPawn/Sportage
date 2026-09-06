@@ -12,12 +12,19 @@ from rich.table import Table
 from .costs import load_cost_config
 from .execution_coordinator import ExecutionCoordinator, ExecutionPlan, ExecutionPolicy, RunStatus
 from .execution_storage import ExecutionStore
+from .live_readiness import LiveReadinessError, assert_live_readiness
 from .models import ArbitrageOpportunity
 from .providers.scheduler import build_adaptive_provider
 from .storage import SQLiteStore
+from .venue_certification import VenueCertificationStore, VenueCertifier
 
 app = typer.Typer(no_args_is_help=True, help="Sportage fail-closed execution coordinator")
 console = Console()
+
+
+def _bind_db(db: Path) -> None:
+    """Keep connector-level live gates on the exact DB selected by this CLI command."""
+    os.environ["ARB_DB_PATH"] = str(db)
 
 
 def _policy(path: Path | None) -> ExecutionPolicy:
@@ -37,6 +44,77 @@ def _cost_path(path: Path | None) -> Path | None:
     return candidate if candidate.exists() else None
 
 
+def _print_certification(report) -> None:
+    state = "PASS" if report.success else "FAIL"
+    console.print(
+        f"[bold]{report.operator_id}/{report.environment}[/bold] {state} "
+        f"certified_at={report.certified_at.isoformat()} expires={report.expires_at.isoformat()}"
+    )
+    table = Table("Check", "OK", "Message")
+    for check in report.checks:
+        table.add_row(check.name, "yes" if check.ok else "NO", check.message)
+    console.print(table)
+
+
+@app.command("venue-certify")
+def venue_certify(
+    operator: str = typer.Option(..., help="betfair, betflag, or all"),
+    environment: str | None = typer.Option(None, help="BetFlag: staging or production; Betfair is production"),
+    ttl_hours: float = typer.Option(24.0, min=0.1, max=168.0),
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
+) -> None:
+    _bind_db(db)
+    operators = ["betfair", "betflag"] if operator.lower() == "all" else [operator.lower()]
+    invalid = [item for item in operators if item not in {"betfair", "betflag"}]
+    if invalid:
+        raise typer.BadParameter("Only betfair, betflag, or all can be certified for automatic execution")
+    if operator.lower() == "all" and environment is not None:
+        raise typer.BadParameter("--environment applies only when certifying a single venue")
+
+    store = SQLiteStore(db)
+    failures = 0
+    try:
+        certification_store = VenueCertificationStore(store.conn)
+        certifier = VenueCertifier(certification_store)
+        for item in operators:
+            requested_environment = environment if item == "betflag" else None
+            report = certifier.certify(item, environment=requested_environment, ttl_hours=ttl_hours)
+            _print_certification(report)
+            failures += 0 if report.success else 1
+    finally:
+        store.close()
+    if failures:
+        raise typer.Exit(code=2)
+
+
+@app.command("venue-status")
+def venue_status(
+    db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
+) -> None:
+    _bind_db(db)
+    store = SQLiteStore(db)
+    try:
+        certification_store = VenueCertificationStore(store.conn)
+        reports = certification_store.all_latest()
+        if not reports:
+            console.print("No venue certifications recorded.")
+            return
+        table = Table("Operator", "Environment", "Result", "Valid now", "Certified", "Expires")
+        for report in reports:
+            valid = certification_store.valid(report.operator_id, report.environment)
+            table.add_row(
+                report.operator_id,
+                report.environment,
+                "PASS" if report.success else "FAIL",
+                "yes" if valid else "NO",
+                report.certified_at.isoformat(),
+                report.expires_at.isoformat(),
+            )
+        console.print(table)
+    finally:
+        store.close()
+
+
 @app.command("prepare")
 def prepare(
     scan_id: int = typer.Option(..., min=1),
@@ -46,6 +124,7 @@ def prepare(
     costs: Path | None = typer.Option(None, exists=True),
     live: bool = typer.Option(False, help="Mark this plan as eligible for live execution on resume"),
 ) -> None:
+    _bind_db(db)
     store = SQLiteStore(db)
     try:
         rows = store.conn.execute(
@@ -56,8 +135,25 @@ def prepare(
             raise typer.BadParameter(f"scan {scan_id} has only {len(rows)} stored opportunities")
         opportunity = ArbitrageOpportunity.model_validate(json.loads(rows[opportunity_index]["payload"]))
         quotes = store.load_quotes_for_scan(scan_id)
+        execution_policy = _policy(policy)
+
+        if live:
+            certifications = VenueCertificationStore(store.conn)
+            try:
+                rescue_map = assert_live_readiness(
+                    opportunity,
+                    quotes,
+                    certifications,
+                    max_quote_age_seconds=execution_policy.max_quote_age_seconds,
+                )
+            except LiveReadinessError as exc:
+                raise typer.BadParameter(f"Live readiness failed: {exc}") from exc
+            console.print("[bold]Certified independent rescue map[/bold]")
+            for failed_operator, alternatives in rescue_map.items():
+                console.print(f"  {failed_operator} -> {', '.join(alternatives)}")
+
         coordinator = ExecutionCoordinator(
-            store, policy=_policy(policy), cost_book=load_cost_config(_cost_path(costs))
+            store, policy=execution_policy, cost_book=load_cost_config(_cost_path(costs))
         )
         plan = coordinator.prepare(opportunity, quotes, live=live)
         run = coordinator.exec_store.get_run(plan.execution_id)
@@ -98,6 +194,7 @@ def confirm(
     policy: Path | None = typer.Option(None, exists=True),
     costs: Path | None = typer.Option(None, exists=True),
 ) -> None:
+    _bind_db(db)
     store = SQLiteStore(db)
     try:
         coordinator = ExecutionCoordinator(
@@ -127,6 +224,7 @@ def resume(
     ),
     live: bool = typer.Option(False, help="Actually submit supported official-API orders"),
 ) -> None:
+    _bind_db(db)
     provider = build_adaptive_provider(scheduler_config)
     report = provider.fetch_report()
     if not report.quotes:
@@ -149,6 +247,7 @@ def status(
     execution_id: str = typer.Option(...),
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3")), exists=True),
 ) -> None:
+    _bind_db(db)
     store = SQLiteStore(db)
     try:
         execution = ExecutionStore(store.conn)
@@ -185,6 +284,7 @@ def halt(
     reason: str = typer.Option(...),
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
 ) -> None:
+    _bind_db(db)
     store = SQLiteStore(db)
     try:
         ExecutionStore(store.conn).set_halt(f"manual: {reason}")
@@ -202,6 +302,7 @@ def resolve_emergency(
 ) -> None:
     if not confirm_flat:
         raise typer.BadParameter("Use --confirm-flat only after independently verifying that exposure is flat")
+    _bind_db(db)
     store = SQLiteStore(db)
     try:
         execution = ExecutionStore(store.conn)

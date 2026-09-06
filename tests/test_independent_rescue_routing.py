@@ -157,6 +157,9 @@ def quotes() -> list[Quote]:
 def install_fake_registry(monkeypatch):
     reset_all()
     HealthyBetflag.submitted = 0
+    # These tests isolate circuit-breaker/rescue routing. Certification gating has
+    # dedicated tests in test_venue_certification.py and remains enabled by default.
+    monkeypatch.setenv("SPORTAGE_REQUIRE_LIVE_CERTIFICATION", "false")
     monkeypatch.setitem(execution_module._EXECUTION_CONNECTORS, "bet365", FakeManual)
     monkeypatch.setitem(execution_module._EXECUTION_CONNECTORS, "betfair", FailingBetfair)
     monkeypatch.setitem(execution_module._EXECUTION_CONNECTORS, "betflag", HealthyBetflag)

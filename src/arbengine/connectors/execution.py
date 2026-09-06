@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+from pathlib import Path
 
 from arbengine.operators import operator_spec
 
@@ -52,15 +54,42 @@ def _cooldown_seconds() -> float:
         return 60.0
 
 
-class HealthTrackedExecutionConnector(ExecutionConnector):
-    """Wrap an official automatic connector with a short fail-closed circuit breaker.
+def _live_certification_required() -> bool:
+    return os.getenv("SPORTAGE_REQUIRE_LIVE_CERTIFICATION", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
-    A failed/partial/unknown live placement marks the venue unhealthy before control
-    returns to the coordinator. Subsequent connector construction therefore advertises
-    `automatic_execution=False`, which prevents the rescue router from selecting the
-    same venue that just failed. The cooldown is intentionally short-lived and in-memory;
-    unresolved exposure is still protected durably by the coordinator's global halt.
-    """
+
+def _live_certification_valid(operator_id: str) -> tuple[bool, str]:
+    """Read the durable certification gate lazily to avoid connector import cycles."""
+    if not _live_certification_required():
+        return True, "Live certification gate explicitly disabled."
+    from arbengine.venue_certification import VenueCertificationStore, execution_environment
+
+    db = Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        store = VenueCertificationStore(conn)
+        environment = execution_environment(operator_id)
+        report = store.latest(operator_id, environment)
+        if report is None:
+            return False, f"No venue certification for {operator_id}/{environment}."
+        if not report.success:
+            return False, f"Latest venue certification failed for {operator_id}/{environment}."
+        if not store.valid(operator_id, environment):
+            return False, f"Venue certification expired for {operator_id}/{environment}."
+        return True, f"Venue certification valid for {operator_id}/{environment} until {report.expires_at.isoformat()}."
+    finally:
+        conn.close()
+
+
+class HealthTrackedExecutionConnector(ExecutionConnector):
+    """Automatic connector wrapper with circuit breaker and durable live certification gate."""
 
     def __init__(self, inner: ExecutionConnector) -> None:
         self.inner = inner
@@ -68,6 +97,9 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
         self.automatic_execution = bool(
             getattr(inner, "automatic_execution", False) and execution_available(self.operator_id)
         )
+
+    def certification_probe(self):
+        return self.inner.certification_probe()
 
     def _trip(self, reason: str) -> None:
         if getattr(self.inner, "automatic_execution", False):
@@ -92,6 +124,18 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
         return result
 
     def place_order(self, order: BetOrder, *, live: bool = False) -> ExecutionResult:
+        if live:
+            certified, reason = _live_certification_valid(self.operator_id)
+            if not certified:
+                self._trip(f"live certification gate: {reason}")
+                return ExecutionResult(
+                    operator_id=self.operator_id,
+                    status=ExecutionStatus.REJECTED,
+                    message=f"Live execution blocked: {reason}",
+                    customer_order_ref=order.customer_order_ref,
+                    requested_stake=order.stake,
+                    requested_odds=order.limit_odds,
+                )
         try:
             result = self.inner.place_order(order, live=live)
         except Exception as exc:
@@ -136,6 +180,8 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
         market_id: str | None = None,
         live: bool = False,
     ) -> ExecutionResult:
+        # Cancellation/reconciliation remain available even when certification expires;
+        # emergency risk reduction must never be blocked by a readiness gate.
         return self.inner.cancel_order(bet_id, market_id=market_id, live=live)
 
 

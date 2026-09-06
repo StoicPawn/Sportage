@@ -11,16 +11,58 @@ Sportage cannot create a true distributed transaction across independent bookmak
 5. Exchange hedges and rescue orders use strict price limits and full-size FILL_OR_KILL where supported.
 6. BetFlag has no documented native FILL_OR_KILL; Sportage cancels the unmatched remainder immediately and treats any partial fill as exposure requiring rescue.
 7. A failed automatic venue is circuit-broken before rescue routing, so it cannot immediately rescue its own failed hedge.
-8. A rescue is allowed only inside configured maximum loss and slippage limits.
-9. Unresolved exposure triggers `EMERGENCY` and a global halt.
-10. Emergency locks survive process restarts and require explicit manual reconciliation.
-11. Manual-only retail connectors never pretend to have placed a bet.
+8. A live plan is armed only if every automatic venue has a current successful certification for the exact environment.
+9. Before a live plan is created, each automatic venue must have a different certified automatic venue able to cover every outcome in the same market with fresh native execution references.
+10. The automatic connector factory re-checks certification immediately before every live placement, so CLI bypass cannot silently disable the gate.
+11. Cancellation and reconciliation remain available even if certification expires; emergency risk reduction is never blocked by the readiness gate.
+12. A rescue is allowed only inside configured maximum loss and slippage limits.
+13. Unresolved exposure triggers `EMERGENCY` and a global halt.
+14. Emergency locks survive process restarts and require explicit manual reconciliation.
+15. Manual-only retail connectors never pretend to have placed a bet.
+
+## Venue certification gate
+
+Certification is read-only: it never calls the placement endpoint.
+
+For **Betfair** it verifies:
+
+- `BETFAIR_APP_KEY` and `BETFAIR_SESSION_TOKEN` are configured;
+- direct API-NG market data returns executable native `marketId` / `selectionId` references and depth;
+- the authenticated `listCurrentOrders` endpoint is readable;
+- a fresh market/selection preflight validates current price, depth and market version.
+
+For **BetFlag** it verifies:
+
+- API key configuration plus session token or username/password;
+- the exact configured environment (`staging` or `production`);
+- official direct market data returns native market/selection references and depth;
+- authenticated `GET /offers/all/{market}` is readable, proving the session can access the reconciliation endpoint;
+- a fresh execution preflight validates current price, depth and market version.
+
+Successful certification is persisted in SQLite with an expiry timestamp. Staging and production are different certifications: a successful BetFlag staging certification does **not** unlock production.
+
+```bash
+sportage-exec venue-certify --operator betfair
+sportage-exec venue-certify --operator betflag --environment staging
+sportage-exec venue-certify --operator betflag --environment production
+sportage-exec venue-status
+```
+
+The default certification TTL is 24 hours. Re-run certification whenever credentials, API keys, environment or account configuration changes.
 
 ## Normal retail + exchange path
 
 ```text
-PREPARE
-  -> validate net ROI / quote age / rescue coverage
+CERTIFY VENUES
+  -> authenticated read-only probes
+  -> direct market-data/native-id validation
+  -> execution preflight
+  -> durable certification PASS
+
+PREPARE --live
+  -> validate net ROI / quote age
+  -> require certification for automatic legs
+  -> require independent certified rescue map
   -> acquire event-market lock
   -> prepare manual retail primary
   -> prepare automatic exchange hedge
@@ -31,6 +73,7 @@ WAITING_MANUAL
 
 EXECUTING
   -> exchange preflight refresh
+  -> certification checked again immediately before live placement
   -> verify market, price, depth and native market version
   -> submit strict automatic hedge
 
@@ -108,14 +151,25 @@ Environment:
 
 ```text
 SPORTAGE_EXECUTION_VENUE_COOLDOWN_SECONDS=60
+SPORTAGE_REQUIRE_LIVE_CERTIFICATION=true
 SPORTAGE_LIVE_EXECUTION=false
 ```
+
+`SPORTAGE_REQUIRE_LIVE_CERTIFICATION=true` is the default. Disabling it is an explicit development override and should not be used for production execution.
 
 These are safety limits, not profitability assumptions. They should be calibrated from real shadow/execution telemetry.
 
 ## CLI workflow
 
-Prepare the highest-ranked stored opportunity in a scan:
+First certify the automatic venues:
+
+```bash
+sportage-exec venue-certify --operator betfair
+sportage-exec venue-certify --operator betflag --environment production
+sportage-exec venue-status
+```
+
+Prepare the highest-ranked stored opportunity in a scan. For `--live`, Sportage prints the certified failover map and refuses to create the plan if independent rescue is unavailable:
 
 ```bash
 sportage-exec prepare --scan-id 123 --live
@@ -162,7 +216,7 @@ sportage-exec resolve-emergency \
 
 ## Current automatic venues
 
-The Italy profile now has two verified official automatic execution connectors:
+The Italy profile has two verified official automatic execution connectors:
 
 - **Betfair Exchange API-NG** — native FILL_OR_KILL, market version, client order references and reconciliation.
 - **BetFlag Exchange API 2.0.7** — official market data, login/session, placement, cancellation and user-order reconciliation; immediate cancellation is used for any unmatched remainder because native FILL_OR_KILL is not publicly documented.
