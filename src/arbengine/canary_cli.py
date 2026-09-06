@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .canary import CanaryGuard
+from .execution_storage import ExecutionStore
 from .storage import SQLiteStore
 
 
@@ -22,16 +23,13 @@ def status(
     os.environ["ARB_DB_PATH"] = str(db)
     store = SQLiteStore(db)
     try:
+        ExecutionStore(store.conn)
         guard = CanaryGuard(store.conn)
         summary = guard.today_summary()
         policy = summary["policy"]
         console.print(f"Canary enabled: {summary['enabled']}")
         table = Table("Metric", "Today", "Limit")
-        table.add_row(
-            "Live executions",
-            str(summary["live_executions"]),
-            str(policy["max_live_executions_per_day"]),
-        )
+        table.add_row("Live executions", str(summary["live_executions"]), str(policy["max_live_executions_per_day"]))
         table.add_row(
             "Active live executions",
             str(summary["active_live_executions"]),
@@ -42,11 +40,7 @@ def status(
             f"€{summary['prepared_capital']:.2f}",
             f"€{float(policy['max_daily_prepared_capital']):.2f}",
         )
-        table.add_row(
-            "API order attempts",
-            str(summary["api_order_attempts"]),
-            str(policy["max_api_order_attempts_per_day"]),
-        )
+        table.add_row("API order attempts", str(summary["api_order_attempts"]), str(policy["max_api_order_attempts_per_day"]))
         table.add_row(
             "API authorized liability",
             f"€{summary['api_liability']:.2f}",
