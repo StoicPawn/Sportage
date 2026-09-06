@@ -38,6 +38,11 @@ class Quote(BaseModel):
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "unknown"
     deep_link: str | None = None
+    # Provider-native execution references. They survive normalization and SQL persistence.
+    source_market_id: str | None = None
+    source_selection_id: str | None = None
+    source_market_version: str | None = None
+    available_size: Decimal | None = Field(default=None, ge=0)
 
     @field_validator("commence_time", "observed_at")
     @classmethod
@@ -53,13 +58,7 @@ class Quote(BaseModel):
 
 
 class SettlementResult(BaseModel):
-    """Observed settlement for one exact event+market signature.
-
-    `winning_outcome` must match the normalized outcome label used by the quote
-    adapters (team/player name, Draw, Over, Under, etc.). Results are keyed by
-    event id plus full market signature so totals/spreads with different lines
-    cannot accidentally settle each other.
-    """
+    """Observed settlement for one exact event+market signature."""
 
     event_id: str
     market_signature: str
@@ -81,13 +80,7 @@ class SettlementResult(BaseModel):
 
 
 class CostProfile(BaseModel):
-    """Conservative execution-cost assumptions for one bookmaker/exchange.
-
-    Percentages are decimal fractions: 0.02 means 2%.
-    `commission_on_winnings_pct` is applied only to positive winnings, while
-    `stake_fee_pct` and `fixed_cost_per_bet` are paid whenever the leg is placed.
-    `slippage_bps` conservatively reduces the quoted decimal price.
-    """
+    """Conservative execution-cost assumptions for one bookmaker/exchange."""
 
     bookmaker: str = "*"
     commission_on_winnings_pct: Decimal = Field(default=Decimal("0"), ge=0, lt=1)
@@ -111,6 +104,10 @@ class Leg(BaseModel):
     estimated_placement_cost: Decimal = Decimal("0")
     estimated_win_commission: Decimal = Decimal("0")
     deep_link: str | None = None
+    source_market_id: str | None = None
+    source_selection_id: str | None = None
+    source_market_version: str | None = None
+    available_size: Decimal | None = None
 
 
 class ArbitrageOpportunity(BaseModel):
@@ -138,7 +135,6 @@ class ArbitrageOpportunity(BaseModel):
 
     @property
     def roi(self) -> Decimal:
-        """Backward-compatible alias: all thresholds now use net ROI."""
         return self.net_roi
 
     @property

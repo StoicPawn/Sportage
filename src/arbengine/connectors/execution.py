@@ -20,6 +20,8 @@ from .manual_retail import (
     WinamaxExecutionConnector,
 )
 
+# Only official, configured APIs may advertise automatic execution.
+BetfairExchangeExecutionConnector.automatic_execution = True
 
 _EXECUTION_CONNECTORS: dict[str, type[ExecutionConnector]] = {
     "bet365": Bet365ExecutionConnector,
