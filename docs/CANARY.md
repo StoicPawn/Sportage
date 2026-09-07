@@ -44,6 +44,20 @@ A duplicate `customer_order_ref` is rejected by the canary ledger.
 
 Cancellation and reconciliation are not blocked by canary exhaustion. A safety system must not prevent an already-open exposure from being reduced.
 
+## Safe abort before exposure
+
+A prepared live run may be abandoned with:
+
+```bash
+sportage-exec abort --execution-id exe_...
+```
+
+The abort is fail-closed. Sportage opens an immediate SQLite transaction and checks the durable run/leg ledger before releasing anything. It is allowed only while the run is `waiting_manual` or `prepared` and only if every leg proves zero matched exposure.
+
+The command refuses to abort if any leg is `ACCEPTED`, `PARTIALLY_MATCHED`, `PENDING` or `UNKNOWN`, if any recorded `matched_stake` is positive, or if an operator bet id exists without a proven rejected/cancelled state. In those cases the normal reconcile/rescue/emergency path remains mandatory.
+
+A successful zero-exposure abort marks the run `ABORTED`, appends `ABORTED_ZERO_EXPOSURE` to the audit trail and releases the event/market lock in the same transaction. This frees the active canary slot. The preparation still counts toward the daily preparation limit so repeated prepare/abort cycles cannot bypass canary throttling.
+
 ## Monitoring
 
 ```bash
