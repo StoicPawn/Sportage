@@ -22,7 +22,7 @@ ui = ["streamlit>=1.37,<2", "pandas>=2.2,<3"]
 [project.scripts]
 arbengine = "arbengine.cli:app"
 sportage = "arbengine.cli:app"
-sportage-exec = "arbengine.execution_cli:app"
+sportage-exec = "arbengine.execution_cli_v14:app"
 sportage-canary = "arbengine.canary_cli:app"
 
 [tool.hatch.build.targets.wheel]
