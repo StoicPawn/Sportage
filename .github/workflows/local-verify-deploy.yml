@@ -1,0 +1,68 @@
+name: local-verify-deploy
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sportage-local-main
+  cancel-in-progress: true
+
+jobs:
+  verify-and-deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: [self-hosted, linux, sportage-local]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout trusted commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
+
+      - name: Build isolated test environment
+        run: |
+          rm -rf .gha-venv
+          python3 -m venv .gha-venv
+          .gha-venv/bin/python -m pip install --upgrade pip
+          .gha-venv/bin/pip install -e ".[dev,ui]"
+
+      - name: Run unit tests
+        run: .gha-venv/bin/pytest -q
+
+      - name: Run mock scanner smoke test
+        run: |
+          .gha-venv/bin/sportage scan \
+            --provider mock \
+            --bankroll 1000 \
+            --min-net-roi 0.015 \
+            --costs config/costs.example.json \
+            --liquidity config/liquidity.example.json
+
+      - name: Deploy main to always-on service
+        if: github.event_name == 'workflow_run'
+        run: |
+          set -euo pipefail
+          cd /home/stoicpawn/projects/Sportage
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Production checkout has local changes; refusing to overwrite them."
+            git status --short
+            exit 1
+          fi
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          .venv/bin/python -m pip install -e ".[dev,ui]"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+          systemctl --user restart sportage.service
+          sleep 5
+          curl -fsS http://127.0.0.1:8501/ >/dev/null
+          echo "Sportage deploy and health check OK"
