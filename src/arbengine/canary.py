@@ -106,6 +106,13 @@ class CanaryGuard:
         self.conn.commit()
 
     def assert_plan(self, plan: dict[str, Any]) -> None:
+        # Commissioning authorizes opening new live risk. It is deliberately checked
+        # only here, not in authorize_order(), so an expired certificate can never
+        # block a hedge/rescue for exposure that was already opened.
+        if _env_enabled("SPORTAGE_REQUIRE_COMMISSIONING"):
+            from .commissioning import assert_current_commissioning
+
+            assert_current_commissioning(self.conn)
         if not self.policy.enabled:
             return
         liabilities = _plan_liabilities(plan)
