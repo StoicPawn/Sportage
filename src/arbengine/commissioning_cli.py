@@ -19,6 +19,13 @@ def _bind_db(db: Path) -> None:
     os.environ["ARB_DB_PATH"] = str(db)
 
 
+def _default_ttl_minutes() -> float:
+    try:
+        return max(1.0, min(float(os.getenv("SPORTAGE_COMMISSIONING_TTL_MINUTES", "30")), 240.0))
+    except ValueError:
+        return 30.0
+
+
 def _print_report(report) -> None:
     state = "PASS" if report.success else "FAIL"
     console.print(
@@ -35,7 +42,7 @@ def _print_report(report) -> None:
 @app.command("run")
 def run(
     db: Path = typer.Option(Path(os.getenv("ARB_DB_PATH", "data/arbitrage.sqlite3"))),
-    ttl_minutes: float = typer.Option(30.0, min=1.0, max=240.0),
+    ttl_minutes: float = typer.Option(_default_ttl_minutes(), min=1.0, max=240.0),
     refresh_certifications: bool = typer.Option(
         True,
         "--refresh-certifications/--use-existing-certifications",
