@@ -5,11 +5,26 @@ from pathlib import Path
 
 import httpx
 
-CERT_LOGIN_URL = "https://identitysso-cert.betfair.com/api/certlogin"
+CERT_LOGIN_URLS = {
+    "IT": "https://identitysso-cert.betfair.it/api/certlogin",
+    "COM": "https://identitysso-cert.betfair.com/api/certlogin",
+    "ES": "https://identitysso-cert.betfair.es/api/certlogin",
+    "RO": "https://identitysso-cert.betfair.ro/api/certlogin",
+    "AU": "https://identitysso-cert.betfair.com.au/api/certlogin",
+    "NZ": "https://identitysso-cert.betfair.com.au/api/certlogin",
+}
 
 
 class BetfairLoginError(RuntimeError):
     pass
+
+
+def _cert_login_url() -> str:
+    override = (os.getenv("BETFAIR_CERT_LOGIN_URL") or "").strip()
+    if override:
+        return override
+    jurisdiction = (os.getenv("BETFAIR_JURISDICTION") or "COM").strip().upper()
+    return CERT_LOGIN_URLS.get(jurisdiction, CERT_LOGIN_URLS["COM"])
 
 
 def configured() -> bool:
@@ -26,11 +41,12 @@ def configured() -> bool:
 
 
 def session_token() -> str:
-    """Return a usable session token without ever persisting it to the repository.
+    """Return a usable session token without persisting it to the repository.
 
-    A static BETFAIR_SESSION_TOKEN remains supported for manual testing. For the
-    always-on ACEPC service, certificate login is preferred because the service can
-    obtain a fresh token each time systemd restarts it.
+    A static BETFAIR_SESSION_TOKEN remains supported for manual testing. For an
+    always-on daemon, certificate login is preferred because a fresh token can be
+    obtained whenever systemd restarts the worker. Italian accounts must authenticate
+    through the Betfair.it certificate endpoint; set BETFAIR_JURISDICTION=IT.
     """
     app_key = (os.getenv("BETFAIR_APP_KEY") or "").strip()
     username = (os.getenv("BETFAIR_USERNAME") or "").strip()
@@ -51,7 +67,7 @@ def session_token() -> str:
                 follow_redirects=True,
             ) as client:
                 response = client.post(
-                    CERT_LOGIN_URL,
+                    _cert_login_url(),
                     headers=headers,
                     data={"username": username, "password": password},
                 )
