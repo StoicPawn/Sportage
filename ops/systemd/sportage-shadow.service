@@ -15,7 +15,7 @@ Environment=ARB_DB_PATH=data/arbitrage.sqlite3
 Environment=ARB_MIN_NET_ROI=0.015
 ExecStart=/usr/bin/bash /home/stoicpawn/projects/Sportage/ops/run_shadow.sh
 Restart=always
-RestartSec=30
+RestartSec=60
 RuntimeMaxSec=6h
 TimeoutStopSec=20
 KillSignal=SIGINT
