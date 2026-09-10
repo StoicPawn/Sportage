@@ -11,7 +11,10 @@ Environment=PYTHONPATH=/home/stoicpawn/projects/Sportage/src
 Environment=SPORTAGE_LIVE_EXECUTION=false
 Environment=SPORTAGE_PROVIDER_WORKERS=2
 Environment=SPORTAGE_SCHEDULER_CONFIG=config/provider_scheduler.acepc.json
-ExecStart=/home/stoicpawn/projects/Sportage/.venv/bin/sportage ui --db data/arbitrage.sqlite3 --host 0.0.0.0 --port 8501
+Environment=STREAMLIT_SERVER_ADDRESS=0.0.0.0
+Environment=STREAMLIT_SERVER_PORT=8501
+Environment=STREAMLIT_SERVER_HEADLESS=true
+ExecStart=/home/stoicpawn/projects/Sportage/.venv/bin/sportage ui --db data/arbitrage.sqlite3
 Restart=on-failure
 RestartSec=10
 Slice=side-projects.slice
