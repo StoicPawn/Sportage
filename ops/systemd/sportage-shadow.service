@@ -1,0 +1,29 @@
+[Unit]
+Description=Sportage adaptive read-only arbitrage shadow collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/stoicpawn/projects/Sportage
+EnvironmentFile=-/home/stoicpawn/projects/Sportage/.env
+Environment=PYTHONPATH=/home/stoicpawn/projects/Sportage/src
+Environment=SPORTAGE_LIVE_EXECUTION=false
+Environment=SPORTAGE_PROVIDER_WORKERS=2
+Environment=SPORTAGE_SCHEDULER_CONFIG=config/provider_scheduler.acepc.json
+Environment=ARB_DB_PATH=data/arbitrage.sqlite3
+Environment=ARB_MIN_NET_ROI=0.015
+ExecStart=/home/stoicpawn/projects/Sportage/.venv/bin/sportage shadow --provider adaptive --db data/arbitrage.sqlite3 --min-net-roi 0.015 --costs config/costs.example.json
+Restart=always
+RestartSec=30
+TimeoutStopSec=20
+KillSignal=SIGINT
+Slice=side-projects.slice
+CPUWeight=100
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
