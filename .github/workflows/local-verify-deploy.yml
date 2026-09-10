@@ -48,8 +48,7 @@ jobs:
           fi
           chmod 600 .env
 
-          # Migrate only the legacy two-bookmaker default we previously shipped;
-          # never overwrite a custom operator list supplied by the user.
+          # Keep broad discovery defaults separate from direct personal-account venues.
           LEGACY='ODDS_API_IO_BOOKMAKERS=Bet365,Sisal IT'
           TARGET_BOOKS='ODDS_API_IO_BOOKMAKERS=Bet365,Betfair IT,BetFlag IT,Bwin IT,Eurobet IT,Goldbet IT,Lottomatica IT,Planetwin365 IT,Sisal IT,Snai IT'
           if grep -Fxq "$LEGACY" .env; then
@@ -59,23 +58,30 @@ jobs:
           fi
           grep -q '^SPORTAGE_MIN_OPERATOR_COVERAGE=' .env || printf '%s\n' 'SPORTAGE_MIN_OPERATOR_COVERAGE=10' >> .env
           grep -q '^SPORTAGE_TARGET_OPERATORS=' .env || printf '%s\n' 'SPORTAGE_TARGET_OPERATORS=bet365,betfair,betflag,bwin,eurobet,goldbet,lottomatica,planetwin365,sisal,snai' >> .env
+          grep -q '^SPORTAGE_DIRECT_TARGET_OPERATORS=' .env || printf '%s\n' 'SPORTAGE_DIRECT_TARGET_OPERATORS=betfair,betflag' >> .env
 
           .venv/bin/python - <<'PY'
           from pathlib import Path
           from arbengine.providers.scheduler import load_scheduler_config
           from arbengine.result_archive import _market_signature
           from arbengine.betfair_auth import configured
+          from arbengine.direct_venues import italian_automatic_venue_ids
           cfg = load_scheduler_config(Path('config/provider_scheduler.acepc.json'))
           assert cfg.max_workers <= 2 and cfg.tick_seconds >= 5
           assert callable(_market_signature)
           assert cfg.sources['odds_api_io'].daily_call_limit == 400
-          print(f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}; betfair_auth_configured={configured()}")
+          assert italian_automatic_venue_ids() == ('betfair', 'betflag')
+          print(
+              f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}; "
+              f"betfair_auth_configured={configured()}; direct_italy={italian_automatic_venue_ids()}"
+          )
           PY
           bash -n ops/run_shadow.sh
           bash -n ops/run_results.sh
           grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage.service
           grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-shadow.service
           grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-results.service
+          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-venues.service
 
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
@@ -100,10 +106,14 @@ jobs:
           install -m 0644 ops/systemd/sportage-shadow.service "$USER_UNITS/sportage-shadow.service"
           install -m 0644 ops/systemd/sportage-results.service "$USER_UNITS/sportage-results.service"
           install -m 0644 ops/systemd/sportage-results.timer "$USER_UNITS/sportage-results.timer"
+          install -m 0644 ops/systemd/sportage-venues.service "$USER_UNITS/sportage-venues.service"
+          install -m 0644 ops/systemd/sportage-venues.timer "$USER_UNITS/sportage-venues.timer"
           systemctl --user daemon-reload
-          systemctl --user enable --now sportage.service sportage-shadow.service sportage-results.timer
+          systemctl --user enable --now sportage.service sportage-shadow.service sportage-results.timer sportage-venues.timer
           systemctl --user restart sportage.service sportage-shadow.service
           systemctl --user start --no-block sportage-results.service
+          # This monitor is read-only and persists readiness/funds/certification evidence.
+          systemctl --user start sportage-venues.service || true
 
           UI_OK=0
           for _ in $(seq 1 60); do
@@ -111,8 +121,8 @@ jobs:
             sleep 2
           done
           if [ "$UI_OK" != 1 ]; then
-            systemctl --user status sportage.service sportage-shadow.service sportage-results.timer --no-pager || true
-            journalctl --user -u sportage.service -u sportage-shadow.service -u sportage-results.service -n 160 --no-pager || true
+            systemctl --user status sportage.service sportage-shadow.service sportage-results.timer sportage-venues.timer --no-pager || true
+            journalctl --user -u sportage.service -u sportage-shadow.service -u sportage-results.service -u sportage-venues.service -n 180 --no-pager || true
             exit 1
           fi
 
@@ -139,4 +149,27 @@ jobs:
           CERT_PATH="$(sed -n 's/^BETFAIR_CERT_FILE=//p' .env | tail -1)"
           KEY_PATH="$(sed -n 's/^BETFAIR_KEY_FILE=//p' .env | tail -1)"
           if [ -n "$CERT_PATH" ] && [ -n "$KEY_PATH" ] && [ -f "$CERT_PATH" ] && [ -f "$KEY_PATH" ]; then CERT=1; fi
-          echo "Sportage UI healthy; configured market-data credential families=${SOURCES}; app_key=${APPKEY}; static_session=${STATIC}; cert_pair=${CERT}; live execution hard-disabled."
+
+          DIRECT_STATUS="$(.venv/bin/python - <<'PY'
+          import json, sqlite3
+          from pathlib import Path
+          db = Path('data/arbitrage.sqlite3')
+          if not db.exists():
+              print('{}')
+          else:
+              conn = sqlite3.connect(db)
+              try:
+                  exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_venue_status'").fetchone()
+                  if not exists:
+                      print('{}')
+                  else:
+                      rows = conn.execute(
+                          "SELECT venue_id, health, execution_ready FROM direct_venue_status "
+                          "WHERE venue_id IN ('betfair','betflag') ORDER BY venue_id"
+                      ).fetchall()
+                      print(json.dumps({r[0]: {'health': r[1], 'ready': bool(r[2])} for r in rows}, sort_keys=True))
+              finally:
+                  conn.close()
+          PY
+          )"
+          echo "Sportage UI healthy; configured market-data credential families=${SOURCES}; app_key=${APPKEY}; static_session=${STATIC}; cert_pair=${CERT}; direct_status=${DIRECT_STATUS}; live execution hard-disabled."
