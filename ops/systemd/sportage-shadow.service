@@ -1,5 +1,5 @@
 [Unit]
-Description=Sportage adaptive read-only arbitrage shadow collector
+Description=Sportage direct-broker read-only arbitrage shadow collector
 After=network-online.target
 Wants=network-online.target
 
@@ -13,9 +13,10 @@ Environment=SPORTAGE_PROVIDER_WORKERS=2
 Environment=SPORTAGE_SCHEDULER_CONFIG=config/provider_scheduler.acepc.json
 Environment=ARB_DB_PATH=data/arbitrage.sqlite3
 Environment=ARB_MIN_NET_ROI=0.015
-ExecStart=/home/stoicpawn/projects/Sportage/.venv/bin/sportage shadow --provider adaptive --db data/arbitrage.sqlite3 --min-net-roi 0.015 --costs config/costs.example.json
+ExecStart=/usr/bin/bash /home/stoicpawn/projects/Sportage/ops/run_shadow.sh
 Restart=always
 RestartSec=30
+RuntimeMaxSec=6h
 TimeoutStopSec=20
 KillSignal=SIGINT
 Slice=side-projects.slice
