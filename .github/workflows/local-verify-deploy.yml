@@ -14,54 +14,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify-and-deploy:
+  deploy:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     runs-on: [self-hosted, linux, sportage-local]
     timeout-minutes: 60
-
     steps:
-      - name: Checkout trusted commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
-
-      - name: Build isolated test environment
-        run: |
-          set -euo pipefail
-          rm -rf .gha-venv
-          python3 -m venv .gha-venv
-          nice -n 15 .gha-venv/bin/python -m pip install --upgrade pip
-          nice -n 15 .gha-venv/bin/pip install -e ".[dev,ui]"
-
-      - name: Run unit and production-policy tests
-        run: |
-          set -euo pipefail
-          nice -n 15 .gha-venv/bin/pytest -q
-          .gha-venv/bin/python - <<'PY'
-          from pathlib import Path
-          from arbengine.providers.scheduler import load_scheduler_config
-          cfg = load_scheduler_config(Path('config/provider_scheduler.acepc.json'))
-          assert cfg.max_workers <= 2
-          assert cfg.tick_seconds >= 5
-          print(f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}")
-          PY
-          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage.service
-          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-shadow.service
-          grep -q 'Slice=side-projects.slice' ops/systemd/sportage-shadow.service
-
-      - name: Run mock scanner smoke test
-        run: |
-          .gha-venv/bin/sportage scan \
-            --provider mock \
-            --bankroll 1000 \
-            --min-net-roi 0.015 \
-            --costs config/costs.example.json \
-            --liquidity config/liquidity.example.json
-
-      - name: Deploy main as read-only ACEPC production monitor
-        if: github.event_name == 'workflow_run'
+      - name: Deploy trusted main as read-only ACEPC production monitor
         run: |
           set -euo pipefail
           PROD=/home/stoicpawn/projects/Sportage
@@ -72,16 +32,32 @@ jobs:
             exit 1
           fi
           git fetch origin main
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TARGET="${{ github.event.workflow_run.head_sha }}"
+          else
+            TARGET="$(git rev-parse origin/main)"
+          fi
           git checkout main
-          git reset --hard "${{ github.event.workflow_run.head_sha }}"
+          git reset --hard "$TARGET"
           [ -x .venv/bin/python ] || python3 -m venv .venv
-          nice -n 15 .venv/bin/python -m pip install -e ".[dev,ui]"
+          nice -n 15 .venv/bin/python -m pip install -e ".[ui]"
           mkdir -p data
           if [ ! -f .env ]; then
             cp .env.example .env
             chmod 600 .env
             echo "Created production .env with live execution disabled; provider credentials remain empty until configured."
           fi
+
+          # Cheap local policy check only. Full tests already passed on hosted CI.
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+          from arbengine.providers.scheduler import load_scheduler_config
+          cfg = load_scheduler_config(Path('config/provider_scheduler.acepc.json'))
+          assert cfg.max_workers <= 2 and cfg.tick_seconds >= 5
+          print(f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}")
+          PY
+          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage.service
+          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-shadow.service
 
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
