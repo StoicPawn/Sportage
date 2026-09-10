@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically verify Sportage direct venue readiness
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=15m
+RandomizedDelaySec=30s
+Persistent=true
+Unit=sportage-venues.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=Sportage direct venue health, funds and execution-readiness monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/stoicpawn/projects/Sportage
+EnvironmentFile=-/home/stoicpawn/projects/Sportage/.env
+Environment=PYTHONPATH=/home/stoicpawn/projects/Sportage/src
+# Monitoring/certification is read-only. Never let this daemon place a wager.
+Environment=SPORTAGE_LIVE_EXECUTION=false
+ExecStart=/home/stoicpawn/projects/Sportage/.venv/bin/python -m arbengine.direct_venue_monitor
+TimeoutStartSec=10m
+Slice=side-projects.slice
+CPUWeight=50
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
