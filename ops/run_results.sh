@@ -3,13 +3,7 @@ set -uo pipefail
 ROOT=/home/stoicpawn/projects/Sportage
 cd "$ROOT"
 
-if [ -f .env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . ./.env
-  set +a
-fi
-
+# systemd EnvironmentFile supplies credentials; never source the file as shell code.
 if ! TOKEN="$(.venv/bin/python -m arbengine.betfair_auth 2>/tmp/sportage-betfair-results-auth.err)"; then
   printf '%s Result archive skipped: Betfair credentials/certificate not ready.\n' "$(date --iso-8601=seconds)"
   exit 0
