@@ -1,0 +1,20 @@
+[Unit]
+Description=Sportage Betfair post-event result and settlement archive
+After=network-online.target sportage-shadow.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/stoicpawn/projects/Sportage
+EnvironmentFile=-/home/stoicpawn/projects/Sportage/.env
+Environment=PYTHONPATH=/home/stoicpawn/projects/Sportage/src
+Environment=SPORTAGE_LIVE_EXECUTION=false
+Environment=BETFAIR_JURISDICTION=IT
+ExecStart=/usr/bin/bash /home/stoicpawn/projects/Sportage/ops/run_results.sh
+TimeoutStartSec=10m
+Slice=side-projects.slice
+CPUWeight=50
+Nice=19
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077

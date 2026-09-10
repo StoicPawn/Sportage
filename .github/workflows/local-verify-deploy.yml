@@ -45,19 +45,25 @@ jobs:
           if [ ! -f .env ]; then
             cp .env.example .env
             chmod 600 .env
-            echo "Created production .env with live execution disabled; provider credentials remain empty until configured."
+            echo "Created production .env with live execution disabled; direct broker credentials remain empty until configured."
           fi
+          chmod 600 .env
 
-          # Cheap local policy check only. Full tests already passed on hosted CI.
           .venv/bin/python - <<'PY'
           from pathlib import Path
           from arbengine.providers.scheduler import load_scheduler_config
+          from arbengine.result_archive import _market_signature
+          from arbengine.betfair_auth import configured
           cfg = load_scheduler_config(Path('config/provider_scheduler.acepc.json'))
           assert cfg.max_workers <= 2 and cfg.tick_seconds >= 5
-          print(f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}")
+          assert callable(_market_signature)
+          print(f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}; betfair_auth_configured={configured()}")
           PY
+          bash -n ops/run_shadow.sh
+          bash -n ops/run_results.sh
           grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage.service
           grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-shadow.service
+          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-results.service
 
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
@@ -80,9 +86,12 @@ jobs:
 
           install -m 0644 ops/systemd/sportage.service "$USER_UNITS/sportage.service"
           install -m 0644 ops/systemd/sportage-shadow.service "$USER_UNITS/sportage-shadow.service"
+          install -m 0644 ops/systemd/sportage-results.service "$USER_UNITS/sportage-results.service"
+          install -m 0644 ops/systemd/sportage-results.timer "$USER_UNITS/sportage-results.timer"
           systemctl --user daemon-reload
-          systemctl --user enable --now sportage.service sportage-shadow.service
+          systemctl --user enable --now sportage.service sportage-shadow.service sportage-results.timer
           systemctl --user restart sportage.service sportage-shadow.service
+          systemctl --user start --no-block sportage-results.service
 
           UI_OK=0
           for _ in $(seq 1 60); do
@@ -90,13 +99,15 @@ jobs:
             sleep 2
           done
           if [ "$UI_OK" != 1 ] || ! systemctl --user is-active --quiet sportage-shadow.service; then
-            systemctl --user status sportage.service sportage-shadow.service --no-pager || true
-            journalctl --user -u sportage.service -u sportage-shadow.service -n 160 --no-pager || true
+            systemctl --user status sportage.service sportage-shadow.service sportage-results.timer --no-pager || true
+            journalctl --user -u sportage.service -u sportage-shadow.service -u sportage-results.service -n 160 --no-pager || true
             exit 1
           fi
 
-          SOURCES=0
-          for KEY in THE_ODDS_API_KEY ODDS_API_IO_KEY BETFAIR_APP_KEY BETFLAG_API_KEY; do
-            if grep -Eq "^${KEY}=.+" .env; then SOURCES=$((SOURCES+1)); fi
-          done
-          echo "Sportage UI healthy; shadow collector active; configured provider key fields=${SOURCES}; live execution is hard-disabled by systemd."
+          APPKEY=0; CERT=0; STATIC=0
+          grep -Eq '^BETFAIR_APP_KEY=.+' .env && APPKEY=1 || true
+          grep -Eq '^BETFAIR_SESSION_TOKEN=.+' .env && STATIC=1 || true
+          CERT_PATH="$(sed -n 's/^BETFAIR_CERT_FILE=//p' .env | tail -1)"
+          KEY_PATH="$(sed -n 's/^BETFAIR_KEY_FILE=//p' .env | tail -1)"
+          if [ -n "$CERT_PATH" ] && [ -n "$KEY_PATH" ] && [ -f "$CERT_PATH" ] && [ -f "$KEY_PATH" ]; then CERT=1; fi
+          echo "Sportage UI healthy; direct shadow/result workers enabled; app_key=${APPKEY}; static_session=${STATIC}; cert_pair=${CERT}; live execution hard-disabled."
