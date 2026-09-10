@@ -44,10 +44,21 @@ jobs:
           mkdir -p data
           if [ ! -f .env ]; then
             cp .env.example .env
-            chmod 600 .env
-            echo "Created production .env with live execution disabled; direct broker credentials remain empty until configured."
+            echo "Created production .env with live execution disabled; market-data credentials remain empty until configured."
           fi
           chmod 600 .env
+
+          # Migrate only the legacy two-bookmaker default we previously shipped;
+          # never overwrite a custom operator list supplied by the user.
+          LEGACY='ODDS_API_IO_BOOKMAKERS=Bet365,Sisal IT'
+          TARGET_BOOKS='ODDS_API_IO_BOOKMAKERS=Bet365,Betfair IT,BetFlag IT,Bwin IT,Eurobet IT,Goldbet IT,Lottomatica IT,Planetwin365 IT,Sisal IT,Snai IT'
+          if grep -Fxq "$LEGACY" .env; then
+            sed -i "s|^ODDS_API_IO_BOOKMAKERS=.*$|$TARGET_BOOKS|" .env
+          elif ! grep -q '^ODDS_API_IO_BOOKMAKERS=' .env; then
+            printf '%s\n' "$TARGET_BOOKS" >> .env
+          fi
+          grep -q '^SPORTAGE_MIN_OPERATOR_COVERAGE=' .env || printf '%s\n' 'SPORTAGE_MIN_OPERATOR_COVERAGE=10' >> .env
+          grep -q '^SPORTAGE_TARGET_OPERATORS=' .env || printf '%s\n' 'SPORTAGE_TARGET_OPERATORS=bet365,betfair,betflag,bwin,eurobet,goldbet,lottomatica,planetwin365,sisal,snai' >> .env
 
           .venv/bin/python - <<'PY'
           from pathlib import Path
@@ -57,6 +68,7 @@ jobs:
           cfg = load_scheduler_config(Path('config/provider_scheduler.acepc.json'))
           assert cfg.max_workers <= 2 and cfg.tick_seconds >= 5
           assert callable(_market_signature)
+          assert cfg.sources['odds_api_io'].daily_call_limit == 400
           print(f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}; betfair_auth_configured={configured()}")
           PY
           bash -n ops/run_shadow.sh
@@ -98,10 +110,27 @@ jobs:
             if curl -fsS --max-time 3 http://127.0.0.1:8501/ >/dev/null; then UI_OK=1; break; fi
             sleep 2
           done
-          if [ "$UI_OK" != 1 ] || ! systemctl --user is-active --quiet sportage-shadow.service; then
+          if [ "$UI_OK" != 1 ]; then
             systemctl --user status sportage.service sportage-shadow.service sportage-results.timer --no-pager || true
             journalctl --user -u sportage.service -u sportage-shadow.service -u sportage-results.service -n 160 --no-pager || true
             exit 1
+          fi
+
+          SOURCES=0
+          for KEY in ODDS_API_IO_KEY THE_ODDS_API_KEY BETFAIR_APP_KEY BETFLAG_API_KEY; do
+            grep -Eq "^${KEY}=.+" .env && SOURCES=$((SOURCES+1)) || true
+          done
+          if [ "$SOURCES" -gt 0 ]; then
+            SHADOW_OK=0
+            for _ in $(seq 1 30); do
+              if systemctl --user is-active --quiet sportage-shadow.service; then SHADOW_OK=1; break; fi
+              sleep 2
+            done
+            if [ "$SHADOW_OK" != 1 ]; then
+              systemctl --user status sportage-shadow.service --no-pager || true
+              journalctl --user -u sportage-shadow.service -n 120 --no-pager || true
+              exit 1
+            fi
           fi
 
           APPKEY=0; CERT=0; STATIC=0
@@ -110,4 +139,4 @@ jobs:
           CERT_PATH="$(sed -n 's/^BETFAIR_CERT_FILE=//p' .env | tail -1)"
           KEY_PATH="$(sed -n 's/^BETFAIR_KEY_FILE=//p' .env | tail -1)"
           if [ -n "$CERT_PATH" ] && [ -n "$KEY_PATH" ] && [ -f "$CERT_PATH" ] && [ -f "$KEY_PATH" ]; then CERT=1; fi
-          echo "Sportage UI healthy; direct shadow/result workers enabled; app_key=${APPKEY}; static_session=${STATIC}; cert_pair=${CERT}; live execution hard-disabled."
+          echo "Sportage UI healthy; configured market-data credential families=${SOURCES}; app_key=${APPKEY}; static_session=${STATIC}; cert_pair=${CERT}; live execution hard-disabled."
