@@ -29,13 +29,27 @@ jobs:
 
       - name: Build isolated test environment
         run: |
+          set -euo pipefail
           rm -rf .gha-venv
           python3 -m venv .gha-venv
-          .gha-venv/bin/python -m pip install --upgrade pip
-          .gha-venv/bin/pip install -e ".[dev,ui]"
+          nice -n 15 .gha-venv/bin/python -m pip install --upgrade pip
+          nice -n 15 .gha-venv/bin/pip install -e ".[dev,ui]"
 
-      - name: Run unit tests
-        run: .gha-venv/bin/pytest -q
+      - name: Run unit and production-policy tests
+        run: |
+          set -euo pipefail
+          nice -n 15 .gha-venv/bin/pytest -q
+          .gha-venv/bin/python - <<'PY'
+          from pathlib import Path
+          from arbengine.providers.scheduler import load_scheduler_config
+          cfg = load_scheduler_config(Path('config/provider_scheduler.acepc.json'))
+          assert cfg.max_workers <= 2
+          assert cfg.tick_seconds >= 5
+          print(f"ACEPC scheduler OK: tick={cfg.tick_seconds}s workers={cfg.max_workers}")
+          PY
+          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage.service
+          grep -q 'SPORTAGE_LIVE_EXECUTION=false' ops/systemd/sportage-shadow.service
+          grep -q 'Slice=side-projects.slice' ops/systemd/sportage-shadow.service
 
       - name: Run mock scanner smoke test
         run: |
@@ -46,23 +60,67 @@ jobs:
             --costs config/costs.example.json \
             --liquidity config/liquidity.example.json
 
-      - name: Deploy main to always-on service
+      - name: Deploy main as read-only ACEPC production monitor
         if: github.event_name == 'workflow_run'
         run: |
           set -euo pipefail
-          cd /home/stoicpawn/projects/Sportage
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "Production checkout has local changes; refusing to overwrite them."
+          PROD=/home/stoicpawn/projects/Sportage
+          cd "$PROD"
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            echo "Production checkout has tracked local changes; refusing to overwrite them."
             git status --short
             exit 1
           fi
           git fetch origin main
           git checkout main
-          git pull --ff-only origin main
-          .venv/bin/python -m pip install -e ".[dev,ui]"
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-          export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
-          systemctl --user restart sportage.service
-          sleep 5
-          curl -fsS http://127.0.0.1:8501/ >/dev/null
-          echo "Sportage deploy and health check OK"
+          git reset --hard "${{ github.event.workflow_run.head_sha }}"
+          [ -x .venv/bin/python ] || python3 -m venv .venv
+          nice -n 15 .venv/bin/python -m pip install -e ".[dev,ui]"
+          mkdir -p data
+          if [ ! -f .env ]; then
+            cp .env.example .env
+            chmod 600 .env
+            echo "Created production .env with live execution disabled; provider credentials remain empty until configured."
+          fi
+
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+          USER_UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+          mkdir -p "$USER_UNITS"
+          if [ ! -f "$USER_UNITS/side-projects.slice" ]; then
+            SIDE_QUOTA="$(python3 - <<'PY'
+          import os
+          print(f"{max(1.0, (os.cpu_count() or 1) * 0.15 * 100):.1f}%")
+          PY
+            )"
+            cat > "$USER_UNITS/side-projects.slice" <<EOF
+          [Unit]
+          Description=GoldenBull and Sportage shared CPU envelope
+          [Slice]
+          CPUQuota=$SIDE_QUOTA
+          CPUWeight=100
+          EOF
+          fi
+
+          install -m 0644 ops/systemd/sportage.service "$USER_UNITS/sportage.service"
+          install -m 0644 ops/systemd/sportage-shadow.service "$USER_UNITS/sportage-shadow.service"
+          systemctl --user daemon-reload
+          systemctl --user enable --now sportage.service sportage-shadow.service
+          systemctl --user restart sportage.service sportage-shadow.service
+
+          UI_OK=0
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 3 http://127.0.0.1:8501/ >/dev/null; then UI_OK=1; break; fi
+            sleep 2
+          done
+          if [ "$UI_OK" != 1 ] || ! systemctl --user is-active --quiet sportage-shadow.service; then
+            systemctl --user status sportage.service sportage-shadow.service --no-pager || true
+            journalctl --user -u sportage.service -u sportage-shadow.service -n 160 --no-pager || true
+            exit 1
+          fi
+
+          SOURCES=0
+          for KEY in THE_ODDS_API_KEY ODDS_API_IO_KEY BETFAIR_APP_KEY BETFLAG_API_KEY; do
+            if grep -Eq "^${KEY}=.+" .env; then SOURCES=$((SOURCES+1)); fi
+          done
+          echo "Sportage UI healthy; shadow collector active; configured provider key fields=${SOURCES}; live execution is hard-disabled by systemd."
