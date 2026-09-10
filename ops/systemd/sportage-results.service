@@ -9,6 +9,7 @@ WorkingDirectory=/home/stoicpawn/projects/Sportage
 EnvironmentFile=-/home/stoicpawn/projects/Sportage/.env
 Environment=PYTHONPATH=/home/stoicpawn/projects/Sportage/src
 Environment=SPORTAGE_LIVE_EXECUTION=false
+Environment=BETFAIR_JURISDICTION=IT
 ExecStart=/usr/bin/bash /home/stoicpawn/projects/Sportage/ops/run_results.sh
 TimeoutStartSec=10m
 Slice=side-projects.slice
