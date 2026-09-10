@@ -111,8 +111,6 @@ def _live_order_funded(operator_id: str, order: BetOrder) -> tuple[bool, str, Ac
 
 
 def _authorize_canary_order(order: BetOrder) -> tuple[bool, str, int | None]:
-    # Do not consume canary attempt budget when the master switch guarantees that
-    # the underlying connector cannot send a real order.
     if not _enabled("SPORTAGE_LIVE_EXECUTION", "false"):
         return True, "Master live switch is off; no canary API attempt reserved.", None
     from arbengine.canary import CanaryGuard
@@ -205,7 +203,6 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
                 )
             canary_ok, canary_reason, attempt_id = _authorize_canary_order(order)
             if not canary_ok:
-                # Canary exhaustion is a system risk limit, not a venue-health failure.
                 return ExecutionResult(
                     operator_id=self.operator_id, status=ExecutionStatus.REJECTED,
                     message=f"Live execution blocked: {canary_reason}",
@@ -231,36 +228,38 @@ class HealthTrackedExecutionConnector(ExecutionConnector):
         return result
 
     def reconcile_order(
-        self,
-        *,
-        bet_id: str | None = None,
-        customer_order_ref: str | None = None,
-        market_id: str | None = None,
-        order: BetOrder | None = None,
+        self, *, bet_id: str | None = None, customer_order_ref: str | None = None,
+        market_id: str | None = None, order: BetOrder | None = None,
     ) -> ExecutionResult:
         if self.operator_id == "betflag":
             return self.inner.reconcile_order(
                 bet_id=bet_id, customer_order_ref=customer_order_ref,
                 market_id=market_id, order=order,
             )
-        return self.inner.reconcile_order(
-            bet_id=bet_id,
-            customer_order_ref=customer_order_ref,
-        )
+        return self.inner.reconcile_order(bet_id=bet_id, customer_order_ref=customer_order_ref)
 
-    def cancel_order(
-        self,
-        bet_id: str,
-        *,
-        market_id: str | None = None,
-        live: bool = False,
-    ) -> ExecutionResult:
-        # Never block risk reduction on certification, funds or canary state.
+    def cancel_order(self, bet_id: str, *, market_id: str | None = None, live: bool = False) -> ExecutionResult:
         return self.inner.cancel_order(bet_id, market_id=market_id, live=live)
+
+
+def _refresh_betfair_session_if_needed(operator_id: str) -> None:
+    """Create a short-lived Betfair session for unattended execution processes.
+
+    Certificate credentials stay in the local .env/filesystem. The returned token is
+    put only in this process environment so existing Betfair/account-funds code can
+    use it without persisting or logging it.
+    """
+    if operator_id != "betfair" or os.getenv("BETFAIR_SESSION_TOKEN"):
+        return
+    from arbengine.betfair_auth import configured, session_token
+
+    if configured():
+        os.environ["BETFAIR_SESSION_TOKEN"] = session_token()
 
 
 def build_execution_connector(operator: str) -> ExecutionConnector:
     spec = operator_spec(operator)
+    _refresh_betfair_session_if_needed(spec.operator_id)
     connector_cls = _EXECUTION_CONNECTORS[spec.operator_id]
     connector = connector_cls()
     if getattr(connector, "automatic_execution", False):
