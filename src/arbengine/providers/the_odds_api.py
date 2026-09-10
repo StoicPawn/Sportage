@@ -22,17 +22,17 @@ class TheOddsAPIProvider(OddsProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        sport: str = "upcoming",
-        regions: str = "eu",
-        markets: str = "h2h,spreads,totals",
+        sport: str | None = None,
+        regions: str | None = None,
+        markets: str | None = None,
         timeout: float = 15.0,
     ) -> None:
         self.api_key = api_key or os.getenv("THE_ODDS_API_KEY")
         if not self.api_key:
             raise ValueError("THE_ODDS_API_KEY is required for TheOddsAPIProvider")
-        self.sport = sport
-        self.regions = regions
-        self.markets = markets
+        self.sport = sport or os.getenv("THE_ODDS_API_SPORT", "upcoming")
+        self.regions = regions or os.getenv("THE_ODDS_API_REGIONS", "eu")
+        self.markets = markets or os.getenv("THE_ODDS_API_MARKETS", "h2h,spreads,totals")
         self.timeout = timeout
 
     @staticmethod

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -13,6 +14,16 @@ from .provider_health_storage import ProviderHealthStore
 from .providers.base import OddsProvider
 from .scan_history import ScanHistory
 from .storage import SQLiteStore
+
+
+def _coverage_target() -> tuple[set[str], int]:
+    configured = os.getenv(
+        "SPORTAGE_TARGET_OPERATORS",
+        "bet365,betfair,betflag,bwin,eurobet,goldbet,lottomatica,planetwin365,sisal,snai",
+    )
+    target = {item.strip() for item in configured.split(",") if item.strip()}
+    minimum = max(1, int(os.getenv("SPORTAGE_MIN_OPERATOR_COVERAGE", "10")))
+    return target, minimum
 
 
 def run_shadow_loop(
@@ -33,6 +44,7 @@ def run_shadow_loop(
     history = ScanHistory(store)
     completed = 0
     provider_name = provider.__class__.__name__
+    target_operators, min_coverage = _coverage_target()
 
     attach_budget = getattr(provider, "attach_budget_connection", None)
     if callable(attach_budget):
@@ -56,8 +68,12 @@ def run_shadow_loop(
                         )
                         raise RuntimeError(f"All configured market-data sources failed. {details}")
                     quotes = report.quotes
+                    covered = set(report.covered_operator_ids)
+                    target_seen = covered & target_operators
+                    readiness = "ready" if len(target_seen) >= min_coverage else "building"
                     coverage_text = (
-                        f" | coverage={len(report.covered_operator_ids)}/{len(OPERATORS)}"
+                        f" | coverage={len(covered)}/{len(OPERATORS)}"
+                        f" target={len(target_seen)}/{min_coverage}:{readiness}"
                         f" | fresh={report.successful_source_count}"
                         f" cached={report.cached_source_count}"
                         f" failed={report.failed_source_count}"
