@@ -11,6 +11,7 @@ Environment=PYTHONPATH=/home/stoicpawn/projects/Sportage/src
 Environment=SPORTAGE_LIVE_EXECUTION=false
 Environment=SPORTAGE_PROVIDER_WORKERS=2
 Environment=SPORTAGE_SCHEDULER_CONFIG=config/provider_scheduler.acepc.json
+Environment=BETFAIR_JURISDICTION=IT
 Environment=ARB_DB_PATH=data/arbitrage.sqlite3
 Environment=ARB_MIN_NET_ROI=0.015
 ExecStart=/usr/bin/bash /home/stoicpawn/projects/Sportage/ops/run_shadow.sh
